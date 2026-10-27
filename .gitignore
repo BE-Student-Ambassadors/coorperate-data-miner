@@ -1,0 +1,15 @@
+*/serviceAccountKey.json
+backend/venv/
+backend/__pycache__/
+backend/.env
+drs/node_modules/
+drs/dist/
+.DS_Store
+backend/venv/
+backend/__pycache__/
+backend/.env
+drs/node_modules/
+drs/dist/
+.DS_Store
+*/serviceAccountKey.json
+*/.env

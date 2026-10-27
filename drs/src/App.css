@@ -1,0 +1,1240 @@
+/* Main Page Frame matching Screenshots 1 & 2 */
+.dm-page {
+  min-height: 100vh;
+  border: 2px solid var(--orange-border);
+  border-top-width: 6px;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+/* Top Header */
+.dm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 54px;
+  border-bottom: 2px solid var(--orange-border);
+  background: #ffffff;
+}
+
+.dm-header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 20px;
+}
+
+.dm-title {
+  font-family: Georgia, 'Times New Roman', Times, serif;
+  font-size: 2.35rem;
+  font-weight: 400;
+  color: #000000;
+  cursor: pointer;
+  user-select: none;
+  letter-spacing: -0.3px;
+}
+
+.dm-project-subtitle {
+  font-size: 1.05rem;
+  color: #555;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dm-project-name-input {
+  font-size: 1.05rem;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: #222;
+  font-weight: 600;
+}
+
+.dm-project-name-input:hover,
+.dm-project-name-input:focus {
+  border-color: var(--border-grey);
+  background: #fafafa;
+  outline: none;
+}
+
+.dm-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.85rem;
+}
+
+.dm-user-pill {
+  color: #555;
+  padding: 5px 10px;
+  background: #f5f5f5;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+
+.dm-header-btn {
+  padding: 6px 12px;
+  border: 1px solid #cccccc;
+  background: #ffffff;
+  color: #222222;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s;
+}
+
+.dm-header-btn:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.dm-header-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Main Content Area */
+.dm-main {
+  flex: 1;
+  padding: 28px 64px 60px;
+  max-width: 1260px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* --------------------------------------------------------------------------
+   AUTH / LOGIN VIEW
+   -------------------------------------------------------------------------- */
+.dm-auth-wrap {
+  max-width: 440px;
+  margin: 64px auto;
+  border: 1px solid var(--border-grey);
+  padding: 36px 32px;
+  background: #ffffff;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.05);
+}
+
+.dm-auth-title {
+  font-size: 1.55rem;
+  font-weight: 400;
+  margin-bottom: 8px;
+}
+
+.dm-auth-subtitle {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.88rem;
+  color: #666;
+  margin-bottom: 24px;
+  line-height: 1.45;
+}
+
+.dm-auth-field {
+  margin-bottom: 16px;
+}
+
+.dm-auth-field label {
+  display: block;
+  font-size: 0.88rem;
+  margin-bottom: 6px;
+  color: #222;
+}
+
+.dm-auth-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-grey);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.92rem;
+}
+
+.dm-auth-field input:focus {
+  outline: none;
+  border-color: var(--orange-border);
+}
+
+.dm-auth-submit {
+  width: 100%;
+  padding: 11px 16px;
+  background: var(--orange-btn);
+  border: none;
+  color: #000;
+  font-size: 0.98rem;
+  cursor: pointer;
+  margin-top: 6px;
+  transition: background 0.15s;
+}
+
+.dm-auth-submit:hover {
+  background: var(--orange-btn-hover);
+}
+
+.dm-auth-switch {
+  margin-top: 18px;
+  text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.dm-auth-link {
+  background: none;
+  border: none;
+  color: #d97706;
+  text-decoration: underline;
+  cursor: pointer;
+  margin-left: 5px;
+  font-size: 0.85rem;
+}
+
+.dm-error-banner {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  padding: 10px 14px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+}
+
+/* --------------------------------------------------------------------------
+   SCREEN 1: PROJECTS DASHBOARD (Matches Screenshot 1)
+   -------------------------------------------------------------------------- */
+.dm-new-project-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 26px;
+}
+
+.dm-new-project-btn {
+  background: var(--orange-btn);
+  color: #000000;
+  border: none;
+  padding: 13px 22px;
+  font-size: 0.96rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dm-new-project-btn:hover {
+  background: var(--orange-btn-hover);
+}
+
+.dm-new-project-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dm-new-project-inline input {
+  padding: 10px 12px;
+  border: 1px solid var(--border-grey);
+  font-size: 0.92rem;
+  min-width: 240px;
+}
+
+.dm-projects-table-wrap {
+  margin-left: 16px;
+}
+
+.dm-projects-header {
+  display: grid;
+  grid-template-columns: 1fr 220px 60px;
+  padding: 6px 32px;
+  font-size: 0.78rem;
+  color: #777777;
+}
+
+.dm-projects-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.dm-project-row {
+  display: grid;
+  grid-template-columns: 1fr 220px 60px;
+  align-items: center;
+  min-height: 42px;
+  padding: 0 32px;
+  font-size: 0.98rem;
+  cursor: pointer;
+  transition: filter 0.12s;
+}
+
+.dm-project-row.even {
+  background-color: var(--row-dark);
+}
+
+.dm-project-row.odd {
+  background-color: var(--row-light);
+}
+
+.dm-project-row.clickable:hover {
+  filter: brightness(0.95);
+}
+
+.dm-project-row.empty-row {
+  cursor: default;
+}
+
+.dm-project-date {
+  font-size: 0.82rem;
+  color: #555555;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.dm-project-delete-btn {
+  opacity: 0;
+  background: transparent;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 4px;
+  justify-self: end;
+}
+
+.dm-project-row:hover .dm-project-delete-btn {
+  opacity: 1;
+}
+
+.dm-project-delete-btn:hover {
+  color: #dc2626;
+}
+
+/* --------------------------------------------------------------------------
+   SCREEN 2: PROJECT WORKSPACE (Matches Screenshot 2)
+   -------------------------------------------------------------------------- */
+.dm-section-label {
+  font-size: 0.92rem;
+  font-weight: 400;
+  color: #000000;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Existing Data Box */
+.dm-existing-data-section {
+  margin-bottom: 24px;
+}
+
+.dm-existing-box {
+  border: 1px solid var(--border-grey);
+  padding: 12px 14px 10px;
+  background: #ffffff;
+}
+
+.dm-existing-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dm-existing-input {
+  flex: 1;
+  height: 28px;
+  border: 1px solid var(--border-grey);
+  padding: 2px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.84rem;
+  color: #222;
+}
+
+.dm-existing-input:focus {
+  outline: none;
+  border-color: #888;
+}
+
+.dm-existing-clear {
+  background: none;
+  border: none;
+  font-size: 1.05rem;
+  color: #444;
+  cursor: pointer;
+  padding: 0 6px;
+  line-height: 1;
+}
+
+/* Worksheet Tabs Bar inside Existing Data */
+.dm-tabs-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  gap: 0;
+}
+
+.dm-tab-btn {
+  border: 1px solid var(--border-grey);
+  border-top: none;
+  background: #ffffff;
+  padding: 4px 14px;
+  font-size: 0.76rem;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  cursor: pointer;
+  color: #222;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.12s;
+}
+
+.dm-tab-btn + .dm-tab-btn {
+  border-left: none;
+}
+
+.dm-tab-btn:hover {
+  background: #f3f3f3;
+}
+
+.dm-tab-btn.active {
+  background: #e2e8f0;
+  font-weight: 600;
+  border-bottom: 2px solid var(--orange-border);
+}
+
+.dm-tab-count {
+  font-size: 0.68rem;
+  color: #555;
+  background: rgba(0, 0, 0, 0.07);
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.dm-tab-close {
+  margin-left: 2px;
+  color: #888;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+.dm-tab-close:hover {
+  color: #dc2626;
+}
+
+.dm-tab-btn.add-tab {
+  padding: 4px 10px;
+  color: #333;
+  font-weight: 600;
+}
+
+/* File (.csv) and Google Sheets buttons attached below Existing Data box */
+.dm-source-buttons {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+
+.dm-source-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border: 1px solid var(--border-grey);
+  border-top: none;
+  background: #ffffff;
+  font-size: 0.76rem;
+  cursor: pointer;
+  color: #111;
+  min-width: 118px;
+}
+
+.dm-source-btn + .dm-source-btn {
+  border-left: none;
+}
+
+.dm-source-btn.active-source {
+  background: #d9d9d9;
+  font-weight: 600;
+}
+
+.dm-source-btn:hover:not(:disabled) {
+  background: #e9e9e9;
+}
+
+.gsheet-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 16px;
+  background: #107c41;
+  color: #ffffff;
+  border-radius: 2px;
+  font-size: 9px;
+  font-family: sans-serif;
+  font-weight: 700;
+}
+
+/* Sheet-Style Interactive Table */
+.dm-sheet-container {
+  margin-top: 14px;
+  border: 1px solid var(--border-grey);
+  background: #ffffff;
+}
+
+.dm-sheet-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #f7f7f7;
+  border-bottom: 1px solid var(--border-grey);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.8rem;
+}
+
+.dm-sheet-toolbar-left,
+.dm-sheet-toolbar-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dm-sheet-search {
+  padding: 4px 9px;
+  border: 1px solid #cccccc;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  min-width: 190px;
+}
+
+.dm-sheet-scroll {
+  overflow-x: auto;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.dm-sheet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.83rem;
+}
+
+.dm-sheet-table th {
+  background: #ededed;
+  border-bottom: 1px solid var(--border-grey);
+  border-right: 1px solid var(--border-grey);
+  padding: 7px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: #222;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  white-space: nowrap;
+}
+
+.dm-sheet-table td {
+  border-bottom: 1px solid #e2e2e2;
+  border-right: 1px solid #e2e2e2;
+  padding: 0;
+  min-width: 135px;
+}
+
+.dm-sheet-row-num {
+  width: 44px;
+  min-width: 44px !important;
+  text-align: center;
+  background: #f5f5f5;
+  color: #777;
+  font-size: 0.75rem;
+  padding: 6px 4px !important;
+  user-select: none;
+}
+
+.dm-sheet-cell-input {
+  width: 100%;
+  border: none;
+  padding: 6px 10px;
+  font-size: 0.83rem;
+  background: transparent;
+  color: #111;
+}
+
+.dm-sheet-cell-input.dm-linked-cell-input {
+  color: #1155cc;
+  text-decoration: underline;
+  font-weight: 500;
+}
+
+.dm-sheet-cell-input:focus {
+  outline: 2px solid var(--orange-border);
+  outline-offset: -2px;
+  background: #fffdf7;
+}
+
+.dm-sheet-cell-textarea {
+  width: 100%;
+  border: none;
+  padding: 6px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.81rem;
+  line-height: 1.4;
+  background: transparent;
+  color: #111;
+  resize: vertical;
+}
+
+.dm-sheet-cell-textarea:focus {
+  outline: 2px solid var(--orange-border);
+  outline-offset: -2px;
+  background: #fffdf7;
+}
+
+.dm-merged-cell {
+  background: #fffdf5;
+  vertical-align: middle !important;
+  border-left: 3px solid #f59e0b !important;
+  border-bottom: 1.5px solid #cbd5e1 !important;
+}
+
+.dm-cell-inner {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: 100%;
+  position: relative;
+}
+
+.dm-cell-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 4px;
+  flex-wrap: wrap;
+}
+
+.dm-cell-link-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.69rem;
+  font-weight: 600;
+  color: #1155cc;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-decoration: none;
+}
+
+.dm-cell-link-badge:hover {
+  background: #dbeafe;
+  text-decoration: underline;
+}
+
+.dm-cell-merged-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fde68a;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.dm-merged-detected-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.dm-jump-merged-btn {
+  padding: 3px 9px !important;
+  font-size: 0.74rem !important;
+  background: #fffbeb !important;
+  border-color: #f59e0b !important;
+  color: #92400e !important;
+  font-weight: 600;
+}
+
+.dm-sheet-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  background: #fafafa;
+  border-top: 1px solid var(--border-grey);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.78rem;
+  color: #555;
+}
+
+/* Data Template Box (Matches Screenshot 2) */
+.dm-template-section {
+  margin-bottom: 26px;
+}
+
+.dm-template-box {
+  border: 1px solid var(--border-grey);
+  background: #ffffff;
+}
+
+.dm-template-header {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  border-bottom: 1px solid var(--border-grey);
+  font-size: 0.88rem;
+}
+
+.dm-template-header > div {
+  padding: 8px 24px;
+}
+
+.dm-template-header > div:first-child {
+  border-right: 1px solid var(--border-grey);
+}
+
+.dm-template-rows {
+  border-bottom: 1px solid var(--border-grey);
+}
+
+.dm-template-row {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 34px;
+  align-items: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+.dm-template-row.even {
+  background: var(--row-dark);
+}
+
+.dm-template-row.odd {
+  background: var(--row-light);
+}
+
+.dm-template-row.selected-col {
+  font-weight: 600;
+}
+
+.dm-template-col-cell {
+  padding: 6px 24px 6px 44px;
+  border-right: 1px solid var(--border-grey);
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.dm-template-prop-cell {
+  padding: 6px 18px 6px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #555;
+  font-size: 0.8rem;
+  gap: 12px;
+}
+
+.dm-chevron {
+  font-size: 0.9rem;
+  color: #222;
+  font-weight: 600;
+}
+
+/* Expanded Column Details Panel */
+.dm-column-editor {
+  padding: 18px 22px 24px;
+  background: #ffffff;
+}
+
+.dm-column-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.dm-column-heading {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 1.35rem;
+  font-weight: 500;
+  color: #000000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dm-column-rename-input {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 1.25rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.dm-column-rename-input:hover,
+.dm-column-rename-input:focus {
+  border-color: var(--border-grey);
+  outline: none;
+  background: #f9f9f9;
+}
+
+.dm-special-instructions-wrap {
+  margin-left: 12px;
+  margin-bottom: 16px;
+}
+
+.dm-special-label {
+  display: block;
+  font-size: 0.88rem;
+  color: #222222;
+  margin-bottom: 6px;
+}
+
+.dm-special-input {
+  width: 100%;
+  height: 64px;
+  border: 1px solid var(--border-grey);
+  padding: 10px 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.86rem;
+  resize: vertical;
+}
+
+.dm-special-input:focus {
+  outline: none;
+  border-color: #888;
+}
+
+/* Column Control Rows (Sort, Query Type, Data Type, Filter) */
+.dm-controls-grid {
+  margin-left: 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dm-control-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 28px;
+}
+
+.dm-control-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.dm-control-label {
+  font-size: 0.88rem;
+  color: #222;
+  min-width: 78px;
+}
+
+.dm-segmented {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.dm-seg-btn {
+  background: var(--control-grey);
+  color: #000000;
+  border: none;
+  border-right: 1px solid #d8d8d8;
+  padding: 6px 26px;
+  font-size: 0.86rem;
+  cursor: pointer;
+  min-width: 128px;
+  text-align: center;
+  transition: background 0.12s;
+}
+
+.dm-seg-btn:last-child {
+  border-right: none;
+}
+
+.dm-seg-btn.active {
+  background: var(--control-grey-active);
+  font-weight: 600;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.18);
+}
+
+.dm-seg-btn:hover {
+  filter: brightness(0.95);
+}
+
+.dm-filter-select {
+  background: var(--control-grey);
+  border: none;
+  padding: 6px 16px;
+  font-size: 0.86rem;
+  min-width: 126px;
+  cursor: pointer;
+  color: #000;
+}
+
+.dm-filter-input {
+  background: var(--control-grey);
+  border: none;
+  padding: 6px 12px;
+  font-size: 0.86rem;
+  width: 130px;
+  color: #000;
+}
+
+.dm-filter-input::placeholder {
+  color: #444;
+}
+
+.dm-filter-input:focus {
+  outline: 1px solid #555;
+  background: #cacaca;
+}
+
+/* Checkboxes (Put link & Retrieve all information) inside Column Properties */
+.dm-checkbox-line {
+  margin-top: 8px;
+  gap: 16px;
+}
+
+.dm-checkbox-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-grey);
+  background: #f9fafb;
+  border-radius: 4px;
+  cursor: pointer;
+  flex: 1;
+  min-width: 260px;
+  transition: background 0.12s, border-color 0.12s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.dm-checkbox-card:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+.dm-checkbox-card input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  accent-color: #d97706;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.dm-checkbox-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dm-checkbox-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+.dm-checkbox-desc {
+  font-size: 0.76rem;
+  color: #4b5563;
+  line-height: 1.35;
+}
+
+.dm-retrieve-mode-box {
+  margin-top: 6px;
+  padding: 10px 14px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.dm-retrieve-mode-hint {
+  font-size: 0.76rem;
+  color: #78350f;
+  line-height: 1.35;
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* Recommended MCP's Section (Matches Screenshot 2) */
+.dm-mcps-section {
+  margin-bottom: 34px;
+}
+
+.dm-mcps-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-left: 28px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.dm-mcp-card {
+  width: 92px;
+  height: 92px;
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  user-select: none;
+  transition: transform 0.12s, box-shadow 0.12s, opacity 0.15s;
+}
+
+.dm-mcp-card:hover {
+  transform: translateY(-2px);
+}
+
+.dm-mcp-card.disabled-mcp {
+  opacity: 0.42;
+  filter: grayscale(40%);
+}
+
+.dm-mcp-card.active-mcp {
+  box-shadow: 0 0 0 3px var(--orange-border);
+}
+
+.dm-mcp-linkedin {
+  background: #0077b5;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-weight: 800;
+  font-size: 3.6rem;
+  letter-spacing: -3px;
+  line-height: 1;
+}
+
+.dm-mcp-handshake {
+  background: #d2ff28;
+  color: #101820;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-weight: 900;
+  font-style: italic;
+  font-size: 3.6rem;
+  line-height: 1;
+}
+
+.dm-mcp-custom {
+  background: #1f2937;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-weight: 700;
+  font-size: 0.82rem;
+  padding: 8px;
+  text-align: center;
+}
+
+.dm-mcp-add {
+  background: #ffffff;
+  border: 1.5px solid #b0b0b0;
+  color: #b0b0b0;
+  font-size: 2.2rem;
+  font-weight: 300;
+}
+
+.dm-mcp-check {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--orange-border);
+  color: #000;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-family: sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* AI Agent Prompt Bar & Fetch Data Button */
+.dm-agent-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.dm-agent-prompt-input {
+  flex: 1;
+  min-width: 240px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-grey);
+  font-size: 0.86rem;
+}
+
+.dm-line-count-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-grey);
+  background: #f9f9f9;
+  padding: 4px 10px;
+}
+
+.dm-line-count-label {
+  font-size: 0.82rem;
+  color: #222;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.dm-line-count-input {
+  width: 72px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-grey);
+  font-size: 0.86rem;
+  font-weight: 600;
+  background: #ffffff;
+  color: #111;
+  text-align: center;
+}
+
+.dm-line-count-input:focus {
+  outline: none;
+  border-color: var(--orange-border);
+}
+
+.dm-agent-select {
+  padding: 9px 10px;
+  border: 1px solid var(--border-grey);
+  font-size: 0.84rem;
+  background: #f9f9f9;
+}
+
+.dm-copy-gsheet-btn {
+  background: #107c41 !important;
+  border-color: #0d6534 !important;
+  color: #ffffff !important;
+  font-weight: 600;
+}
+
+.dm-copy-gsheet-btn:hover {
+  background: #0d6534 !important;
+}
+
+.dm-copy-toast {
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+  color: #065f46;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.dm-tsv-preview-box {
+  padding: 10px 12px;
+  background: #f8fafc;
+  border-bottom: 1px solid var(--border-grey);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.dm-tsv-preview-header {
+  font-size: 0.78rem;
+  color: #334155;
+  margin-bottom: 6px;
+}
+
+.dm-tsv-textarea {
+  width: 100%;
+  height: 120px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  border: 1px solid var(--border-grey);
+  background: #ffffff;
+  color: #111;
+  white-space: pre;
+  overflow: auto;
+  resize: vertical;
+}
+
+.dm-fetch-btn {
+  width: 100%;
+  padding: 10px 20px;
+  background: #d9d9d9;
+  border: none;
+  color: #000000;
+  font-size: 0.92rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dm-fetch-btn:hover:not(:disabled) {
+  background: #c8c8c8;
+}
+
+.dm-fetch-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+/* Agent Status Banner */
+.dm-agent-banner {
+  margin-top: 14px;
+  padding: 12px 16px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 0.84rem;
+  color: #78350f;
+  line-height: 1.45;
+}
+
+/* Modal for AI Key / Add MCP */
+.dm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.dm-modal {
+  background: #ffffff;
+  border: 2px solid var(--orange-border);
+  padding: 24px 28px;
+  width: 100%;
+  max-width: 460px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.15);
+}
+
+.dm-modal h3 {
+  margin-bottom: 12px;
+  font-weight: 400;
+}
