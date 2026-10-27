@@ -84,7 +84,12 @@ export interface Project {
   gsheet_sync?: GSheetSyncMeta | null
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+export function getApiBase(): string {
+  const stored =
+    typeof window !== 'undefined' ? localStorage.getItem('DRS_API_BASE_URL') || '' : ''
+  const raw = (stored || import.meta.env.VITE_API_BASE_URL || '').trim()
+  return raw.replace(/\/+$/, '')
+}
 
 async function getAuthHeaders(includeJsonContentType = true): Promise<Record<string, string>> {
   const currentUser = auth.currentUser
@@ -103,7 +108,7 @@ async function getAuthHeaders(includeJsonContentType = true): Promise<Record<str
 
 export async function fetchProjects(): Promise<Project[]> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects`, { headers })
+  const res = await fetch(`${getApiBase()}/api/projects`, { headers })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || 'Failed to fetch projects')
@@ -114,7 +119,7 @@ export async function fetchProjects(): Promise<Project[]> {
 
 export async function createProject(name: string): Promise<Project> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects`, {
+  const res = await fetch(`${getApiBase()}/api/projects`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ name }),
@@ -136,7 +141,7 @@ export async function updateProject(
   > & { sync_to_gsheet?: boolean }
 ): Promise<Project> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}`, {
     method: 'PUT',
     headers,
     body: JSON.stringify(updates),
@@ -157,7 +162,7 @@ export async function updateSheetCell(
   syncToGsheet = true
 ): Promise<{ ok: boolean; gsheet_sync?: GSheetSyncMeta }> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/cell`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/cell`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -182,7 +187,7 @@ export async function addRowToTab(
   syncToGsheet = true
 ): Promise<Project> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/add-row`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/add-row`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -200,7 +205,7 @@ export async function addRowToTab(
 
 export async function deleteProject(projectId: string): Promise<void> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}`, {
     method: 'DELETE',
     headers,
   })
@@ -222,7 +227,7 @@ export async function uploadCsvFile(
   formData.append('tab_id', tabId)
   formData.append('sync_columns', String(syncColumns))
 
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/upload-csv`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/upload-csv`, {
     method: 'POST',
     headers,
     body: formData,
@@ -241,7 +246,7 @@ export async function importGoogleSheet(
   syncColumns = true
 ): Promise<Project> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/import-gsheet`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/import-gsheet`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ url, tab_id: tabId, sync_columns: syncColumns }),
@@ -259,7 +264,7 @@ export async function syncGoogleSheet(
   tabId?: string
 ): Promise<Project> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/sync-gsheet`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/sync-gsheet`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ direction, tab_id: tabId }),
@@ -283,7 +288,7 @@ export async function runFetchDataAgent(
   }
 ): Promise<Project> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/fetch-data`, {
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/fetch-data`, {
     method: 'POST',
     headers,
     body: JSON.stringify(options),
