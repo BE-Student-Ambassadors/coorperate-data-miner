@@ -139,6 +139,11 @@ class AddRowRequest(BaseModel):
     sync_to_gsheet: bool = True
 
 
+class ShareProjectRequest(BaseModel):
+    email: str
+    role: Literal["viewer", "editor"] = "editor"
+
+
 class FetchDataRequest(BaseModel):
     query_prompt: Optional[str] = ""
     tab_id: Optional[str] = None
@@ -173,6 +178,31 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
             status_code=401,
             detail=f"Invalid or expired Firebase authentication token: {str(exc)}",
         )
+
+
+_ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+
+
+def _project_role(project: Dict[str, Any], user: Dict[str, Any]) -> Optional[str]:
+    """"owner", the member's "editor"/"viewer" role, or None when the user has no access."""
+    if project.get("owner_uid") == user["uid"]:
+        return "owner"
+    member = (project.get("members") or {}).get(user["uid"])
+    return member.get("role") if isinstance(member, dict) else None
+
+
+def _require_project_role(project: Dict[str, Any], user: Dict[str, Any], needed: str) -> str:
+    role = _project_role(project, user)
+    if role is None:
+        raise HTTPException(status_code=403, detail="Not authorized to access this project")
+    if _ROLE_RANK.get(role, 0) < _ROLE_RANK[needed]:
+        detail = (
+            "You have view-only access to this project"
+            if role == "viewer"
+            else "Only the project owner can do this"
+        )
+        raise HTTPException(status_code=403, detail=detail)
+    return role
 
 
 def _now_iso() -> str:
@@ -2156,7 +2186,9 @@ def _enqueue_fetch_chunk_sync(job_id: str) -> None:
             credentials.ApplicationDefault(), {"projectId": project_id}, name="tasks"
         )
     queue = admin_functions.task_queue("locations/us-central1/functions/fetchjob", app=_tasks_app)
-    queue.enqueue({"job_id": job_id})
+    # The Python Admin SDK posts this object as the raw request body, but task functions only accept
+    # bodies shaped {"data": ...} (what the Node SDK sends), so wrap it ourselves.
+    queue.enqueue({"data": {"job_id": job_id}})
 
 
 async def _enqueue_fetch_chunk(job_id: str) -> None:
@@ -2194,8 +2226,8 @@ def _claim_fetch_job(job_ref: Any) -> str:
     return _claim(transaction)
 
 
-def _send_fetch_email(to_addr: str, subject: str, body: str) -> str:
-    """Sends the completion email from the notification Gmail account. Returns a status note."""
+def _send_email(to_addr: str, subject: str, body: str) -> str:
+    """Sends a notification from the notification Gmail account. Returns a status note."""
     sender = os.getenv("NOTIFY_EMAIL_FROM", "besabreak@gmail.com").strip()
     password = os.getenv("NOTIFY_EMAIL_APP_PASSWORD", "").replace(" ", "")
     if not to_addr:
@@ -2252,7 +2284,7 @@ async def _finalize_fetch_job(
         subject = (
             f"Data fetch done: {len(final_rows)}/{requested} rows for {job.get('project_name', 'your project')}"
         )
-        email_status = await asyncio.to_thread(_send_fetch_email, job.get("owner_email", ""), subject, body)
+        email_status = await asyncio.to_thread(_send_email, job.get("owner_email", ""), subject, body)
 
     progress["status"] = "done"
     progress["stop_reason"] = stop_reason
@@ -2457,13 +2489,20 @@ async def list_projects(user: Dict[str, Any] = Depends(get_current_user)):
     email = user.get("email", "")
 
     projects_ref = db.collection("projects")
-    query_snap = projects_ref.where("owner_uid", "==", uid).stream()
-
     projects: List[Dict[str, Any]] = []
-    for doc in query_snap:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        projects.append(data)
+    seen_ids: set[str] = set()
+    # Projects the user owns, then projects shared with them.
+    for query in (
+        projects_ref.where("owner_uid", "==", uid),
+        projects_ref.where("member_uids", "array_contains", uid),
+    ):
+        for doc in query.stream():
+            if doc.id in seen_ids:
+                continue
+            seen_ids.add(doc.id)
+            data = doc.to_dict()
+            data["id"] = doc.id
+            projects.append(data)
 
     if not projects:
         starters = _build_starter_projects(uid, email)
@@ -2557,8 +2596,7 @@ async def get_project(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     data = doc.to_dict()
-    if data.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized to access this project")
+    _require_project_role(data, user, "viewer")
     data["id"] = doc.id
     return data
 
@@ -2574,10 +2612,9 @@ async def update_project(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     existing = doc.to_dict()
-    if existing.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this project")
+    _require_project_role(existing, user, "editor")
 
-    updates: Dict[str, Any] = {"last_edited": _now_iso()}
+    updates: Dict[str, Any] = {"last_edited": _now_iso(), "last_edited_by": user.get("email", "")}
     if payload.name is not None:
         updates["name"] = payload.name.strip() or existing.get("name", "Untitled")
     if payload.existing_data_source is not None:
@@ -2630,8 +2667,7 @@ async def update_sheet_cell(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "editor")
 
     tabs = project.get("tabs", [])
     target_tab = next((t for t in tabs if t.get("id") == payload.tab_id), None)
@@ -2657,7 +2693,7 @@ async def update_sheet_cell(
             project.get("columns", []),
         )
 
-    doc_ref.update({"tabs": tabs, "last_edited": _now_iso()})
+    doc_ref.update({"tabs": tabs, "last_edited": _now_iso(), "last_edited_by": user.get("email", "")})
     return {"ok": True, "gsheet_sync": gsheet_sync}
 
 
@@ -2672,8 +2708,7 @@ async def add_row_to_tab(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "editor")
 
     tabs = project.get("tabs", [])
     target_tab = next((t for t in tabs if t.get("id") == payload.tab_id), None)
@@ -2697,7 +2732,7 @@ async def add_row_to_tab(
             append_only_rows=[new_row],
         )
 
-    doc_ref.update({"tabs": tabs, "last_edited": _now_iso()})
+    doc_ref.update({"tabs": tabs, "last_edited": _now_iso(), "last_edited_by": user.get("email", "")})
     updated = doc_ref.get().to_dict()
     updated["id"] = project_id
     updated["gsheet_sync"] = gsheet_sync
@@ -2714,8 +2749,7 @@ async def delete_project(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     existing = doc.to_dict()
-    if existing.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this project")
+    _require_project_role(existing, user, "owner")
     doc_ref.delete()
     return {"deleted": True, "id": project_id}
 
@@ -2733,8 +2767,7 @@ async def upload_csv_to_project(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "editor")
 
     raw_bytes = await file.read()
     text = raw_bytes.decode("utf-8-sig", errors="replace")
@@ -2783,7 +2816,7 @@ async def upload_csv_to_project(
         "existing_data_type": "csv",
         "tabs": tabs,
         "columns": columns,
-        "last_edited": _now_iso(),
+        "last_edited": _now_iso(), "last_edited_by": user.get("email", ""),
     }
     doc_ref.update(updates)
     updated = doc_ref.get().to_dict()
@@ -2805,8 +2838,7 @@ async def import_google_sheet(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "editor")
 
     sheet_url = payload.url.strip()
     pulled = await pull_all_tabs_from_google_sheet(sheet_url, project.get("columns", []))
@@ -2817,7 +2849,7 @@ async def import_google_sheet(
         "tabs": pulled["tabs"],
         "columns": pulled["columns"] if payload.sync_columns else project.get("columns", []),
         "active_tab_id": pulled["active_tab_id"],
-        "last_edited": _now_iso(),
+        "last_edited": _now_iso(), "last_edited_by": user.get("email", ""),
     }
     doc_ref.update(updates)
     updated = doc_ref.get().to_dict()
@@ -2848,8 +2880,7 @@ async def sync_google_sheet(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "editor")
 
     sheet_url = project.get("existing_data_source", "").strip()
     if not extract_spreadsheet_id(sheet_url):
@@ -2866,7 +2897,7 @@ async def sync_google_sheet(
             "tabs": pulled["tabs"],
             "columns": pulled["columns"],
             "active_tab_id": next_active,
-            "last_edited": _now_iso(),
+            "last_edited": _now_iso(), "last_edited_by": user.get("email", ""),
         }
         doc_ref.update(updates)
         updated = doc_ref.get().to_dict()
@@ -2890,7 +2921,7 @@ async def sync_google_sheet(
         res = push_tab_to_google_sheet(sheet_url, t, columns)
         results.append(res)
 
-    doc_ref.update({"tabs": tabs, "last_edited": _now_iso()})
+    doc_ref.update({"tabs": tabs, "last_edited": _now_iso(), "last_edited_by": user.get("email", "")})
     updated = doc_ref.get().to_dict()
     updated["id"] = project_id
     updated["gsheet_sync"] = {
@@ -2912,8 +2943,7 @@ async def fetch_data_with_agent(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "editor")
 
     # If the user pasted a Google Sheets URL in Existing Data without clicking Google Sheets first, pull it automatically
     source_str = (project.get("existing_data_source") or "").strip()
@@ -2995,7 +3025,7 @@ async def fetch_data_with_agent(
         "new_rows": [],
         "last_agent_run": None,
         "fetch_progress": progress,
-        "last_edited": _now_iso(),
+        "last_edited": _now_iso(), "last_edited_by": user.get("email", ""),
     })
     try:
         await _enqueue_fetch_chunk(job_id)
@@ -3023,8 +3053,7 @@ async def cancel_fetch(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "editor")
 
     progress = dict(project.get("fetch_progress") or {})
     if progress.get("status") == "running" and progress.get("run_id"):
@@ -3060,8 +3089,7 @@ async def get_fetch_progress(
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
     project = doc.to_dict()
-    if project.get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(project, user, "viewer")
     rows = project.get("new_rows") or []
     return {
         "progress": project.get("fetch_progress"),
@@ -3079,8 +3107,7 @@ async def clear_new_data(
     doc = doc_ref.get()
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Project not found")
-    if doc.to_dict().get("owner_uid") != user["uid"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    _require_project_role(doc.to_dict(), user, "editor")
     if (doc.to_dict().get("fetch_progress") or {}).get("status") == "running":
         raise HTTPException(status_code=409, detail="A fetch is still running. Stop it before clearing.")
     doc_ref.update({
@@ -3088,7 +3115,120 @@ async def clear_new_data(
         "new_headers": [],
         "last_agent_run": None,
         "fetch_progress": None,
+        "last_edited": _now_iso(), "last_edited_by": user.get("email", ""),
+    })
+    updated = doc_ref.get().to_dict()
+    updated["id"] = project_id
+    return updated
+
+
+@app.get("/api/projects/{project_id}/version")
+async def get_project_version(
+    project_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Cheap change check so open clients (collaborators, other tabs) know when to reload."""
+    doc = db.collection("projects").document(project_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project = doc.to_dict()
+    role = _require_project_role(project, user, "viewer")
+    return {
+        "last_edited": project.get("last_edited", ""),
+        "last_edited_by": project.get("last_edited_by", ""),
+        "my_role": role,
+    }
+
+
+@app.post("/api/projects/{project_id}/members")
+async def share_project(
+    project_id: str,
+    payload: ShareProjectRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Shares the project with an existing account, or changes that member's role."""
+    doc_ref = db.collection("projects").document(project_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project = doc.to_dict()
+    _require_project_role(project, user, "owner")
+
+    email = payload.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    try:
+        target = await asyncio.to_thread(firebase_auth.get_user_by_email, email)
+    except firebase_auth.UserNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No account uses {email}. Ask them to sign up first, then share again.",
+        )
+    if target.uid == project.get("owner_uid"):
+        raise HTTPException(status_code=400, detail="That account already owns this project.")
+    # Sign-up does not prove email ownership, so only share with verified addresses; otherwise anyone
+    # could register someone else's email and receive what is shared with it.
+    if not target.email_verified:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{email} has not verified their email yet. They can do that from the banner after signing in; then share again.",
+        )
+
+    members: Dict[str, Any] = dict(project.get("members") or {})
+    is_new = target.uid not in members
+    members[target.uid] = {
+        "email": target.email or email,
+        "role": payload.role,
+        "added_at": members.get(target.uid, {}).get("added_at") or _now_iso(),
+        "added_by": user.get("email", ""),
+    }
+    await asyncio.to_thread(doc_ref.update, {
+        "members": members,
+        "member_uids": sorted(members),
         "last_edited": _now_iso(),
+        "last_edited_by": user.get("email", ""),
+    })
+
+    if is_new:
+        app_url = os.getenv("APP_URL", "").strip()
+        access = "edit" if payload.role == "editor" else "view"
+        await asyncio.to_thread(
+            _send_email,
+            target.email or email,
+            f"{user.get('email', 'Someone')} shared \"{project.get('name', 'a project')}\" with you",
+            f"{user.get('email', 'Someone')} shared the project \"{project.get('name', 'a project')}\" with you. "
+            f"You can {access} it.\n\nIt now appears in your project list"
+            + (f": {app_url}" if app_url else "."),
+        )
+
+    updated = doc_ref.get().to_dict()
+    updated["id"] = project_id
+    return updated
+
+
+@app.delete("/api/projects/{project_id}/members/{member_uid}")
+async def remove_project_member(
+    project_id: str,
+    member_uid: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """The owner removes a member, or a member leaves the project."""
+    doc_ref = db.collection("projects").document(project_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project = doc.to_dict()
+    if member_uid != user["uid"]:
+        _require_project_role(project, user, "owner")
+
+    members: Dict[str, Any] = dict(project.get("members") or {})
+    if members.pop(member_uid, None) is None:
+        raise HTTPException(status_code=404, detail="That account is not a member of this project.")
+    await asyncio.to_thread(doc_ref.update, {
+        "members": members,
+        "member_uids": sorted(members),
+        "last_edited": _now_iso(),
+        "last_edited_by": user.get("email", ""),
     })
     updated = doc_ref.get().to_dict()
     updated["id"] = project_id
