@@ -9,7 +9,6 @@ if str(backend_dir) not in sys.path:
 
 import httpx
 from firebase_functions import https_fn
-from firebase_functions.options import CorsOptions
 from werkzeug.wrappers import Response
 from app import app
 
@@ -37,18 +36,16 @@ async def _dispatch_asgi(
         )
 
 
-@https_fn.on_request(
-    cors=CorsOptions(
-        cors_origins="*",
-        cors_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
-    ),
-    memory=512,
-    timeout_sec=120,
-)
+@https_fn.on_request(memory=512, timeout_sec=120)
 def api(req: https_fn.Request) -> https_fn.Response:
     """Firebase Cloud Functions v2 HTTP handler for FastAPI application."""
     path = req.path or "/"
-    # Normalize paths so requests work whether called with or without /api prefix
+
+    # Normalize double /api/api/... to /api/... if client sent redundant prefix
+    while path.startswith("/api/api"):
+        path = path.replace("/api/api", "/api", 1)
+
+    # Ensure path starts with /api for FastAPI route matching
     if not path.startswith("/api"):
         path = f"/api{path}" if path.startswith("/") else f"/api/{path}"
 
@@ -66,14 +63,29 @@ def api(req: https_fn.Request) -> https_fn.Response:
                 body=req.get_data(),
             )
         )
+
+        # Filter hop-by-hop headers and deduplicate
+        out_headers = {}
+        for k, v in resp.headers.items():
+            if k.lower() in ("content-length", "content-encoding", "transfer-encoding", "connection"):
+                continue
+            out_headers[k] = v
+
         return Response(
             response=resp.content,
             status=resp.status_code,
-            headers=dict(resp.headers),
+            headers=out_headers,
         )
     except Exception as e:
+        origin = req.headers.get("Origin", "*")
         return Response(
             response=f'{{"detail": "Internal server error: {str(e)}"}}',
             status=500,
             content_type="application/json",
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD",
+                "Access-Control-Allow-Headers": "*",
+            },
         )

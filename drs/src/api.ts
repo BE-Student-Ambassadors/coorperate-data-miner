@@ -87,8 +87,9 @@ export interface Project {
 export function getApiBase(): string {
   const stored =
     typeof window !== 'undefined' ? localStorage.getItem('DRS_API_BASE_URL') || '' : ''
-  const raw = (stored || import.meta.env.VITE_API_BASE_URL || '').trim()
-  return raw.replace(/\/+$/, '')
+  const raw = (stored || import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
+  // Strip trailing /api so that appending /api/... never results in /api/api/...
+  return raw.replace(/\/api$/, '')
 }
 
 async function getAuthHeaders(includeJsonContentType = true): Promise<Record<string, string>> {
