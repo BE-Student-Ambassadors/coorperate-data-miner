@@ -32,11 +32,11 @@ async def _dispatch_asgi(
             url=url,
             headers=headers,
             content=body,
-            timeout=115.0,
+            timeout=535.0,
         )
 
 
-@https_fn.on_request(memory=512, timeout_sec=120)
+@https_fn.on_request(memory=512, timeout_sec=540)
 def api(req: https_fn.Request) -> https_fn.Response:
     """Firebase Cloud Functions v2 HTTP handler for FastAPI application."""
     path = req.path or "/"
