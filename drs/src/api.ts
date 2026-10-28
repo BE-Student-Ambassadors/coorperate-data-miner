@@ -50,6 +50,8 @@ export interface AgentRunMeta {
   deduplicated_against_count?: number
   target_tab_name?: string
   live_ai: boolean
+  stop_reason?: 'target_reached' | 'exhausted' | 'time_budget' | 'api_error' | 'no_api_key'
+  batches_run?: number
 }
 
 export interface GSheetSyncMeta {

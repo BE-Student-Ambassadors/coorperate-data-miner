@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import difflib
 import functools
@@ -961,304 +962,8 @@ async def scrape_urls_context(urls: List[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Google Sheets Format Learner, Deduplication Engine & High-Scale Generator
+# Google Sheets Format Learner & Deduplication Engine
 # ---------------------------------------------------------------------------
-
-FIRST_NAMES_POOL = [
-    "Aarav", "Abigail", "Ada", "Aditi", "Adrian", "Aiden", "Akash", "Alana", "Alejandro", "Alex",
-    "alexa", "Alexander", "Alexandra", "Alexis", "Alice", "Alicia", "Alina", "Allison", "Alyssa", "Amanda",
-    "Amara", "Amber", "Amelia", "Amir", "Amit", "Amy", "Ana", "Ananya", "Andre", "Andrea",
-    "Andres", "Andrew", "Angela", "Angelina", "Anika", "Anish", "Anita", "Anjali", "Anna", "Annabelle",
-    "Anthony", "Antonio", "Anya", "Aria", "Ariana", "Arjun", "Armaan", "Arthur", "Arya", "Aryan",
-    "Ashley", "Ashwin", "Audrey", "Austin", "Ava", "Avery", "Ayaan", "Ayesha", "beatrice", "Benjamin",
-    "Bianca", "Blake", "Brandon", "Brenda", "Brian", "Brianna", "Brooke", "Bryan", "Caleb", "calvin",
-    "Cameron", "Camila", "Carlos", "Carmen", "Caroline", "Carter", "Cassandra", "Catherine", "cedric", "Celeste",
-    "Charles", "Charlie", "Charlotte", "Chelsea", " Chloe", "Christian", "Christina", "Christopher", "Claire", "Clara",
-    "Claudia", "Cole", "Colin", "Connor", "Cooper", "Courtney", "Cristian", "Crystal", "Cyrus", "Daisy",
-    "Damian", "Dana", "Daniel", "Daniela", "Danielle", "Dante", "Daria", "Darius", "David", " Dean",
-    "Deepak", "Delilah", "Dennis", "Derek", "Devin", "Devon", "Dev", "Dhruv", "Diana", "Diego",
-    "Divya", "Dominic", "Donovan", "Dorian", "Douglas", "Dylan", "Eden", "Edgar", "Eduardo", "Edward",
-    "Edwin", "Eleanor", "Elena", "Eli", "Eliana", "Elias", "Elijah", "Elise", "Elizabeth", "Ella",
-    "Elliot", "Eloise", "Elsa", "Emilio", "Emily", "Emma", "Emmanuel", "Eric", "Erica", "Erik",
-    "Erin", "Esmeralda", "Esteban", "Ethan", "Eugene", "Eva", "Evan", "Evelyn", "Ezra", "Fabian",
-    "Faith", "Fatima", "Felix", "Fernando", "Fiona", "Francesca", "Francisco", "Frank", "Freya", "Gabriel",
-    "Gabriela", "Gabrielle", "Gael", "Garrett", "Gavin", "Gemma", "Genevieve", "George", "Georgia", "Gianna",
-    "Gideon", "Giovanni", "Giselle", "Grace", "Grayson", "Gregory", "Greta", "Griffin", "Guillermo", "Hailey",
-    "Hamza", "Hana", "Hannah", "Harini", "Harley", "Harper", "Harrison", "Harsh", "Hassan", "Hayden",
-    "Hazel", "Heather", "Hector", "Heidi", "Helen", "Helena", "Henry", "Holly", "Holden", "Hope",
-    "Hudson", "Hugh", "Hunter", "Ian", "Ibrahim", "ignacio", "Ilya", "Imani", "India", "Ingrid",
-    "Irene", "Iris", "Isaac", "Isabel", "Isabella", "Isabelle", "Isaiah", "Ishaan", "Isla", "Israel",
-    "Ivan", "Ivy", "Jack", "Jackson", "Jacob", "Jacqueline", "Jade", "Jaden", "Jake", "James",
-    "Jamie", " Janelle", "Jared", "Jasmine", "Jason", "Jasper", "Javier", "Jay", "Jayden", "Jayson",
-    "Jean", "Jeffrey", "Jenna", "Jennifer", "jeremiah", "Jeremy", "Jesse", "Jessica", "Jia", "Jian",
-    "Jill", "Jocelyn", " Joel", "Johanna", "John", "Jonathan", "Jordan", "Jorge", "Jose", "Joseph",
-    "Josephine", "Joshua", "Josiah", "Joy", "Joyce", "Juan", "Judah", "Jude", "Julia", "Julian",
-    "Juliana", "juliet", "Juliette", "Jun", "Justin", "Kabir", "Kai", "Kaia", "Kaitlyn", "Kaleb",
-    "kameron", "Karen", "Karina", "Karthik", "Kate", "Katelyn", "Katherine", "Kathleen", "Kathryn", "Katie",
-    "Kavya", "Kayla", "Keegan", "Keira", "keith", "Kelly", "Kelsey", "Kendall", "Kendrick", "Kenneth",
-    "Kenji", "Kevin", "Khadija", "Khalil", "Kiara", "Kieran", "kimberly", "Kiran", "Krish", "Kristen",
-    "Kristina", "Kunal", "Kyle", "Kylie", "Laila", "Lana", "Landon", "Lara", "Laura", "Lauren",
-    "Layla", " Leah", "Leandro", "Lee", "Leila", "Leo", "Leon", "Leonardo", "Leslie", "Levi",
-    "Liam", "Liana", "Lila", "Lilian", "Liliana", "Lillian", "Lily", "Lina", "Lincoln", "Linda",
-    "Lindsay", "Logan", "Lola", "Lorenzo", "Louis", "Luca", "Lucas", "Lucia", "Luciana", "Lucy",
-    "Luis", "Lukas", "Luke", "Luna", "Lydia", "Mackenzie", "Madeline", "Madelyn", "Madison", "Maeve",
-    "Maggie", "Maia", "Makayla", "Malachi", "Malcolm", "Malia", "Mallory", "Manav", "Manuel", "Marc",
-    "Marcel", "Marco", "Marcos", "Marcus", "Margaret", "Maria", "Mariah", "Mariana", "Marie", "Marina",
-    "Mario", "Marissa", "Mark", "Marlene", "Marshall", " Martha", "Martin", "Marvin", "Mary", "Mason",
-    "Mateo", "Mathew", "Matias", "Matteo", "Matthew", "Mauricio", "Max", "Maximilian", "Maxwell", "Maya",
-    "Mckenzie", "Meera", "Megan", "meghan", "Melanie", "Melissa", "Melody", "Meredith", "Mia", "Micah",
-    "Michael", "Michaela", "Michelle", "Miguel", "Mikaela", "Mikayla", "Mila", "Miles", "Milo", "Mina",
-    "Miranda", "Miriam", "Mitchell", "Mohamed", "Mohammed", "Molly", "Monica", "Morgan", "Mustafa", "Mya",
-    "Myles", "Nadia", "Nadine", "Nikhil", "Naomi", "Natalia", "Natalie", "Natasha", "Nathan", "Nathaniel",
-    "navya", "Neel", "Neil", "Nelson", "Nia", "Nicholas", "Nico", "Nicola", "Nicolas", "Nicole",
-    "Nina", "Nirav", "Nisha", "Noah", "Noelle", "Nolan", "Nora", "Norman", "Nova", "Octavia",
-    "oliver", "Olivia", "Omar", "Ophelia", "Orion", "Orlando", "Oscar", "Otis", "Owen", "Pablo",
-    "Paige", "Paloma", "Pamela", "Paola", "Parker", "parth", "Patricia", "Patrick", "Paul", "Paula",
-    "Paxton", "Payton", "Pedro", "Penelope", "Peter", "Peyton", "Philip", "Phillip", "Phoebe", "Pierce",
-    "piper", "Pranav", "Preston", "Priya", "Quentin", "Quinn", "Rachel", "Rafael", "Rahul", "Raj",
-    "Rami", "Ramon", "Randall", "Raquel", "Rayan", "Raymond", "Reagan", "Rebecca", "Reese", "Regina",
-    "Reid", "Remi", "Renee", "Reyna", "Rhea", "Ricardo", "Richard", "Riley", "Rishi", "River",
-    "Robert", "Roberto", "Rocco", "Rohan", "Roman", "Ronald", "Ronan", "Rory", "Rosa", "Rosalie",
-    "Rose", "Rowan", "Roy", "Ruby", "Russell", "Ruth", "Ryan", "Ryder", "Sabrina", "Sadie",
-    "Sahil", "Saige", "Salma", "Salvador", "Sam", "Samantha", "Sameer", "Samir", "Samira", "Samuel",
-    "Sana", "Sandra", "Sanjana", "Sanjay", "Santiago", "Sara", "Sarah", "Sasha", "Savannah", "Sawyer",
-    "Scarlett", "Scott", "Sean", "Sebastian", "Selena", "Serena", "Sergio", "Seth", "Shane", "Shannon",
-    "Shaun", "Shawn", "Shreya", "Siddharth", "Sienna", "Sierra", "Silas", "Simon", "Simone", "Skylar",
-    "Sloane", "Sofia", "Sonia", "Sonya", "Sophia", "Sophie", "Spencer", "Stacy", "Stanley", "Stella",
-    "Stephan", "Stephanie", "Stephen", "Steven", "Summer", "Suraj", "Sydney", "Sylvia", "Talia", "Tamara",
-    "Tanvi", "tanya", "Tara", "Tate", "Tatiana", "Taylor", "Teagan", "Teresa", "Tessa", "Theo",
-    "Theodore", "Theresa", "Thomas", "Tiana", "Tiffany", "timothy", "Tobias", "Toby", "Tomas", "Tony",
-    "Tori", "Travis", "Trevor", "Tristan", "Troy", "Tucker", "Tyler", "Umar", "Valentina", "Valeria",
-    "Valerie", "Vanessa", "Varun", "Vaughn", "Vera", "Veronica", "Victor", "Victoria", "Vikram", "Vincent",
-    "Violet", "Virginia", "Vishal", "Vivian", "Vivienne", "Wade", "Walker", "Walter", "Warren", "Wesley",
-    "Weston", "Whitney", "William", "Willow", "Wilson", "Winston", "Wyatt", "Xander", "Xavier", "Ximena",
-    "Yael", "Yara", "Yash", "Yasmine", "Yuri", "Yusuf", "Zachary", "Zaid", "Zain", "Zainab",
-    "Zane", "Zara", "Zayden", "Zayn", "Zeke", "Zoe", "Zoey", "Zora", "Zoya", "Zuri",
-]
-FIRST_NAMES_POOL = [n.strip().title() for n in FIRST_NAMES_POOL]
-
-LAST_NAMES_POOL = [
-    "Abbott", "Abe", "Abdi", "Abraham", "Abrams", "Acevedo", "Acharya", "Acosta", "Adams", "Adkins",
-    "Agarwal", "Aguilar", "Aguirre", "Ahmad", "Ahmed", "Ahn", "Ahuja", "Akhtar", "Al-Mansoor", "Albright",
-    "Alderman", "Alexander", "Alfaro", "Ali", "Allen", "Allison", "Almeida", "Alonso", "Alvarado", "Alvarez",
-    "Amador", "Amin", "Anand", "Andersen", "Anderson", "Andrade", "Andrews", "Anthony", "Aoki", "Aquino",
-    "Archer", "Arellano", "Arias", "Armstrong", "Arnold", "Arora", "Arroyo", "Arthur", "Arya", "Ashby",
-    "Ashley", "Atkins", "Atkinson", "Au", "Austin", "Avila", "Ayala", "Ayers", "Aziz", "Babu",
-    "Bach", "Bae", "Baez", "Bagchi", "Bailey", "Bains", "Baird", "Baker", "Balakrishnan", "Baldwin",
-    "Ball", "Ballard", "Banerjee", "Banks", "Bao", "Barajas", "Barber", "Barbosa", "Barker", "Barnes",
-    "Barnett", "Barr", "Barrera", "Barrett", "Barron", "Barry", "Bartlett", "Barton", "Basu", "Bates",
-    "Bauer", "Bautista", "Baxter", "Bean", "Beard", "Beasley", "Beck", "Becker", "Bedford", "Beltran",
-    "Benitez", "Benjamin", "Bennett", "Benson", "Bentley", "Benton", "Berg", "Berger", "Bergstrom", "Bernal",
-    "Bernard", "Berry", "Best", "Bhat", "Bhatia", "Bhatt", "Bhattacharya", "Bianchi", "Bindra", "Bird",
-    "Bishop", "Biswas", "Black", "Blackburn", "Blackwell", "Blair", "Blake", "Blanchard", "Blankenship", "Blevins",
-    "Bloom", "Bock", "Bolton", "Bond", "Bonilla", "Booker", "Boone", "Booth", "Borges", "Bose",
-    "Bowen", "Bowers", "Bowman", "Boyd", "Boyer", "Boyle", "Bradford", "Bradley", "Bradshaw", "Brady",
-    "Branch", "Brandt", "Braun", "Bravo", "Brennan", "Brewer", "Bridges", "Briggs", "Bright", "Brito",
-    "Brock", "Brooks", "Brown", "Browning", "Bruce", "Bryan", "Bryant", "Buchanan", "Buck", "Buckley",
-    "Burgess", "Burke", "Burnett", "Burns", "Burton", "Bush", "Butler", "Byrd", "Byrne", "Cabrera",
-    "Cai", "Cain", "Calderon", "Caldwell", "Calhoun", "Callahan", "Camacho", "Cameron", "Campbell", "Campos",
-    "Cannon", "Cantrell", "Cantu", "Cao", "Cardenas", "Carey", "Carlson", "Carney", "Carpenter", "Carr",
-    "Carrillo", "Carroll", "Carson", "Carter", "Carvalho", "Carver", "Case", "Casey", "Castaneda", "Castillo",
-    "Castro", "Cervantes", "Chacko", "Chai", "Chakraborty", "Chambers", "Chan", "Chand", "Chandra", "Chandran",
-    "Chang", "Chapman", "Charles", "Chase", "Chatterjee", "Chaudhari", "Chaudhry", "Chaudhuri", "Chauhan", "Chavez",
-    "Chen", "Cheng", "Cheung", "Chiang", "Chiu", "Cho", "Choi", "Chopra", "Chou", "Choudhury",
-    "Chow", "Chowdhury", "Christensen", "Christian", "Chu", "Chun", "Chung", "Cisneros", "Clark", "Clarke",
-    "Clay", "Clayton", "Clements", "Cline", "Cobb", "Cochran", "Coffey", "Cohen", "Cole", "Coleman",
-    "Collier", "Collins", "Colon", "Combs", "Compton", "Conley", "Conner", "Connolly", "Conrad", "Contreras",
-    "Conway", "Cook", "Cooke", "Cooley", "Cooper", "Copeland", "Corbett", "Cordova", "Corona", "Correa",
-    "Cortez", "Costa", "Costello", "Cote", "Cowan", "Cox", "Craig", "Crane", "Crawford", "Crosby",
-    "Cross", "Cruz", "Cui", "Cullen", "Cummings", "Cunningham", "Curry", "Curtis", "D'Souza", "Dai",
-    "Dalal", "Dale", "Dalton", "Daly", "Dam", "Dang", "Daniel", "Daniels", "Dao", "Das",
-    "Dasgupta", "Datta", "Daugherty", "Davenport", "David", "Davidson", "Davies", "avila", "Davis", "Dawson",
-    "Day", "De La Cruz", "De Leon", "Dean", "Decker", "Delgado", "Demir", "Deng", "Dennis", "Desai",
-    "Deshmukh", "Deshpande", "Dev", "Devan", "Dey", "Dhaliwal", "Dhar", "Dhawan", "Dhillon", "Diaz",
-    "Dickerson", "Dickson", "Dillard", "Dillon", "Dinh", "Dixit", "Dixon", "Do", "Doan", "Dobbs",
-    "Dodson", "Dogan", "Dominguez", "Donahue", "Donaldson", "Dong", "Donnelly", "Donovan", "Dorsey", "Dougherty",
-    "Douglas", "Downs", "Doyle", "Drake", "Du", "Duan", "Duarte", "Dubey", "Dubois", "Dudley",
-    "Duffy", "Duke", "Duncan", "Dunlap", "Dunn", "Duong", "Duran", "Durham", "Dutta", "Dwivedi",
-    "Dyer", "Eaton", "Edwards", "Egan", "El-Amin", "Eliott", "Ellis", "Ellison", "Emerson", "Eng",
-    "English", "Enriquez", "Erickson", "Escobar", "Esparza", "Espinoza", "Esposito", "Estes", "Estrada", "Evans",
-    "Everett", "Ewing", "Fabian", "Fan", "Fang", "Farah", "Farley", "Farmer", "Farrell", "Faulkner",
-    "Feng", "Ferguson", "Fernandes", "Fernandez", "Ferrari", "Ferreira", "Ferrell", "Fields", "Figueroa", "Finch",
-    "Finley", "Fischer", "Fisher", "Fitzgerald", "Fitzpatrick", "Fleming", "Fletcher", "Flores", "Flowers", "Floyd",
-    "Flynn", "Foley", "Fong", "Forbes", "Ford", "Foster", "Fowler", "Fox", "Francis", "Franco",
-    "Frank", "Franklin", "Frazier", "Frederick", "Freeman", "French", "Frey", "Friedman", "Fritz", "Frost",
-    "Fry", "Frye", "Fu", "Fuentes", "Fujimoto", "Fuller", "Fung", "Gaines", "Gallagher", "Gallegos",
-    "Gallo", "Galvan", "Gamble", "Gan", "Gandhi", "Gao", "Garcia", "Gardner", "Garg", "Garner",
-    "Garrett", "Garrison", "Garza", "Gates", "Gaur", "Gautam", "Ge", "Gentry", "George", "Ghosh",
-    "Gibbs", "Gibson", "Gilbert", "Giles", "Gill", "Gillespie", "Gilmore", "Glass", "Glenn", "Glover",
-    "Goel", "Goh", "Goldberg", "Golden", "Goldman", "Gomes", "Gomez", "Gong", "Gonzales", "Gonzalez",
-    "Good", "Goodman", "Goodwin", "Gopal", "Gordon", "Gould", "Govind", "Goyal", "Grace", "Grady",
-    "Graham", "Grant", "Graves", "Gray", "Green", "Greene", "Greer", "Gregory", "Gregg", "Grewal",
-    "Griffin", "Griffith", "Grimes", "Gross", "Grover", "Gu", "Guan", "Guerra", "Guerrero", "Guevara",
-    "Guha", "Gulati", "Guo", "Gupta", "Gutierrez", "Guzman", "Ha", "Haas", "Habib", "Hahn",
-    "Hale", "Haley", "Hall", "Hamid", "Hamilton", "Hammond", "Han", "Hancock", "hanna", "Hansen",
-    "Hanson", "Hao", "Haq", "Hardin", "Harding", "Hardy", "Harmon", "Harper", "Harrell", "Harrington",
-    "Harris", "Harrison", "Hart", "Hartman", "Harvey", "Hasan", "Hashimoto", "Hassan", "Hatfield", "Hawkins",
-    "Hayashi", "Hayden", "Hayes", "Haynes", "Hays", "He", "Heath", "Hebert", "Heller", "Henderson",
-    "Hendricks", "Hendrix", "Henry", "Hensley", "Henson", "Herman", "Hernandez", "Herrera", "Herring", "Hess",
-    "Hester", "Hewitt", "Hickman", "Hicks", "Higgins", "Hill", "Hines", "Hinton", "Ho", "Hoang",
-    "Hobbs", "Hodge", "Hodges", "Hoffman", "Hogan", "Holden", "Holder", "Holland", "Holloway", "Holmes",
-    "Holt", "Hong", "Hood", "Hooper", "Hoover", "Hopkins", "Hopper", "Horn", "Horne", "Horton",
-    "Hou", "House", "Houston", "Howard", "Howe", "Howell", "Hsu", "Hu", "Hua", "Huang",
-    "Hubbard", "Huber", "Hudson", "Huerta", "Huff", "Huffman", "Hughes", "Hull", "Humphrey", "Hung",
-    "Hunt", "Hunter", "Hurley", "Hurst", "Hussain", "Hussein", "Hutchinson", "Huynh", "Hwang", "Ibarra",
-    "Ibrahim", "Ikeda", "Ingram", "Iqbal", "Irwin", "isaac", "Ishikawa", "Islam", "Ismail", "Ito",
-    "Iyer", "Jackson", "Jacobs", "Jacobson", "Jain", "Jakob", "James", "Jang", "Jarvis", "Jayaraman",
-    "Jefferson", "Jenkins", "Jennings", "Jensen", "Jeon", "Jeong", "Jha", "Ji", "Jia", "Jiang",
-    "Jimenez", "Jin", "Jindal", "Jo", "Johal", "John", "Johns", "Johnson", "Johnston", "Jones",
-    "Jordan", "Joseph", "Joshi", "Juarez", "Jung", "Kadam", "Kale", "Kamal", "Kamat", "Kamath",
-    "Kane", "Kang", "Kannan", "Kapoor", "Kar", "Karim", "Kato", "Katz", "Kaur", "Kaushik",
-    "Kawakami", "Kay", "Keith", "Keller", "Kelley", "Kelly", "Kemp", "Kennedy", "Kent", "Kerr",
-    "Key", "Khan", "Khanna", "Khatri", "Khoo", "Khoury", "Kidd", "Kikuchi", "Kim", "Kimura",
-    "King", "Kirby", "Kirk", "Klein", "Kline", "Knapp", "Knight", "Ko", "Kobayashi", "Koch",
-    "Koh", "Kohli", "Kojima", "Kong", "Kondo", "Konstantinov", "Koo", "Kothari", "Kovacs", "Kowalski",
-    "Kramer", "Krause", "Krishnan", "Krishnamurthy", "Kroeger", "Kruger", "Kuang", "Kulkarni", "Kumar", "Kundu",
-    "Kuo", "Kurian", "Kwan", "Kwon", "Kwok", "Lai", "Lakshmanan", "Lal", "Lam", "Lamb",
-    "Lambert", "Lan", "Lancaster", "Landry", "Lane", "Lang", "Lange", "Lara", "Larsen", "Larson",
-    "Lau", "Laurent", "Law", "Lawrence", "Lawson", "Lazar", "Le", "Leach", "Leblanc", "Lee",
-    "Lehman", "Lei", "Leon", "Leonard", "Leong", "Leung", "Levine", "Levy", "Lewis", "Li",
-    "Liang", "Liao", "Lim", "Lin", "Lind", "Lindqvist", "Lindsay", "Lindsey", "Ling", "Little",
-    "Liu", "Livingston", "Lloyd", "Lo", "Locke", "Logan", "Loh", "Long", "Lopes", "Lopez",
-    "Lowe", "Lowery", "Lu", "Lucas", "Lugo", "Lui", "Luk", "Luna", "Luo", "Luu",
-    "Ly", "Lynch", "Lynn", "Lyons", "Ma", "Macdonald", "Macias", "Mack", "Mackenzie", "Madden",
-    "Maddox", "Madhavan", "Madrigal", "Maeda", "Magana", "Mahajan", "Mahmood", "Mahmoud", "Mai", "Majumdar",
-    "Mak", "Maldonado", "Malhotra", "Malik", "Mallick", "Malone", "Mandal", "Mann", "Manning", "Mansoor",
-    "Mao", "Mar", "Marin", "Marino", "Marks", "Marquez", "Marsh", "Marshall", "Martin", "Martinez",
-    "masih", "Mason", "Massey", "Mathews", "Mathis", "Mathur", "Matsuda", "Matsumoto", "Matthews", "Maxwell",
-    "May", "Mayer", "Maynard", "Mayo", "Mays", "Mazumdar", "McBride", "McCall", "McCarthy", "McCarty",
-    "McClain", "McClure", "McConnell", "McCormick", "McCoy", "McCullough", "McDaniel", "McDonald", "McDowell", "McFarland",
-    "McGee", "McGrath", "McGuire", "McIntosh", "McIntyre", "McKay", "McKee", "McKenzie", "McKinney", "McKnight",
-    "McLaughlin", "McLean", "McLeod", "McMahon", "McMillan", "McNeil", "McPherson", "Meadows", "Medina", "Medrano",
-    "Mehra", "Mehta", "Mei", "Mejia", "Melendez", "Melton", "Mendez", "Mendoza", "Meng", "Menon",
-    "Mercado", "Mercer", "Merrill", "Merritt", "Meyer", "Meyers", "Miao", "Michael", "Middleton", "Miles",
-    "Miller", "Mills", "Min", "miranda", "Mishra", "Mistry", "Mitchell", "Mitra", "Mittal", "Miura",
-    "Miyamoto", "Miyazaki", "Modi", "Mohamed", "Mohammed", "Mohan", "Mohanty", "Molina", "Monroe", "Montes",
-    "Montgomery", "Montoya", "Moody", "Moon", "Mooney", "Moore", "Mora", "Morales", "Moran", "Moreau",
-    "Moreno", "Morgan", "Mori", "Morimoto", "Morin", "Morris", "Morrison", "Morrow", "Morse", "Morton",
-    "Moser", "Moses", "Mosley", "Moss", "Moyer", "Mueller", "Mukherjee", "Mullen", "Muller", "Mullins",
-    "Muniz", "Munoz", "Murakami", "Murillo", "Murphy", "Murray", "Murthy", "Mustafa", "Myers", "Nadkarni",
-]
-LAST_NAMES_POOL = [n.strip().title() for n in LAST_NAMES_POOL]
-
-TECH_COMPANIES_POOL = [
-    "Google", "Apple", "Microsoft", "NVIDIA", "Amazon", "Meta", "Cisco", "IBM",
-    "Salesforce", "Adobe", "Databricks", "Snowflake", "Stripe", "Cloudflare", "AMD", "Intel",
-    "Oracle", "ServiceNow", "Workday", "Intuit", "PayPal", "Qualcomm", "Broadcom", "Atlassian",
-    "CrowdStrike", "Palo Alto Networks", "Autodesk", "Roblox", "DoorDash", "Uber", "Airbnb", "Pinterest",
-    "Snap", "Block", "Coinbase", "Figma", "OpenAI", "Anthropic", "Scale AI", "Palantir Technologies",
-    "Hewlett Packard", "Lockheed Martin", "Northrop Grumman", "Texas Instruments", "Western Digital", "Seagate Technology", "Juniper Networks", "Arista Networks",
-    "Splunk", "DocuSign", "Twilio", "Okta", "Zoom Video Communications", "Asana", "Dropbox", "Box",
-    "Electronic Arts", "Sony Interactive Entertainment", "Rivian", "Tesla", "SpaceX", "Waymo", "Zoox", "Applied Materials",
-    "Lam Research", "KLA", "Synopsys", "Cadence Design Systems", "Netflix", "Spotify", "Shopify", "HubSpot",
-    "MongoDB", "Confluent", "Datadog", "Elastic", "HashiCorp", "GitLab", "GitHub", " Vercel",
-    "Supabase", "Linear", "Notion", "Airtable", "Rippling", "Gusto", "Brex", "Ramp",
-    "Plaid", "Affirm", "Chime", "Robinhood", "SoFi", "Visa", "Mastercard", "American Express",
-    "JPMorgan Chase", "Goldman Sachs", "Morgan Stanley", "Capital One", "Fidelity Investments", "BlackRock", "Citadel", "Two Sigma",
-]
-TECH_COMPANIES_POOL = [c.strip() for c in TECH_COMPANIES_POOL]
-
-US_CITIES_POOL = [
-    "San Francisco, CA", "San Jose, CA", "Santa Clara, CA", "Sunnyvale, CA", "Mountain View, CA",
-    "Palo Alto, CA", "Menlo Park, CA", "Cupertino, CA", "Redwood City, CA", "San Mateo, CA",
-    "Seattle, WA", "Bellevue, WA", "Redmond, WA", "New York, NY", "Austin, TX",
-    "Boston, MA", "Cambridge, MA", "Los Angeles, CA", "Irvine, CA", "San Diego, CA",
-    "Chicago, IL", "Denver, CO", "Boulder, CO", "Atlanta, GA", "Raleigh, NC",
-    "Pittsburgh, PA", "Washington, DC", "Arlington, VA", "Portland, OR", "Phoenix, AZ",
-]
-
-UNDERGRAD_MAJORS_POOL = [
-    "Computer Science",
-    "Computer Engineering",
-    "Electrical Engineering",
-    "Computer Game Design",
-    "Technology and Information Management",
-    "Robotics Engineering",
-    "Biomolecular Engineering and Bioinformatics",
-    "Applied Mathematics",
-    "Network and Digital Technology",
-]
-
-NON_ENG_MAJORS_POOL = [
-    "Cognitive Science",
-    "Economics",
-    "Business/Managerial Economics",
-    "Psychology",
-    "Sociology",
-    "Game and Interactive Media Design",
-    "Applied Mathematics and Statistics",
-    "Environmental Studies",
-    "Film and Digital Media",
-]
-
-INTERN_POSITIONS_POOL = [
-    "Software Engineer Intern",
-    "Software Engineering Intern",
-    "Machine Learning Engineer Intern",
-    "Data Science Intern",
-    "Hardware Engineering Intern",
-    "Systems Software Engineering Intern",
-    "Frontend Software Engineer Intern",
-    "Backend Software Engineer Intern",
-    "Cloud Infrastructure Engineer Intern",
-    "AI Research Intern",
-    "Embedded Systems Engineer Intern",
-    "Cybersecurity Engineering Intern",
-    "Product Management Intern",
-    "Data Engineering Intern",
-    "DevOps Engineering Intern",
-    "Full Stack Software Engineer Intern",
-    "Firmware Engineering Intern",
-    "Robotics Software Engineer Intern",
-]
-
-FULLTIME_POSITIONS_POOL = [
-    "Software Engineer",
-    "Associate Software Engineer",
-    "Software Development Engineer",
-    "Machine Learning Engineer",
-    "Data Engineer",
-    "Data Scientist",
-    "Hardware Engineer",
-    "Systems Engineer",
-    "Full Stack Software Engineer",
-    "Backend Engineer",
-    "Site Reliability Engineer",
-    "Cloud Platform Engineer",
-    "Security Engineer",
-    "Embedded Software Engineer",
-    "AI Application Engineer",
-    "Product Engineer",
-    "Solutions Architect",
-    "Firmware Engineer",
-]
-
-NON_ENG_POSITIONS_POOL = [
-    "Operations Specialist",
-    "Technical Specialist",
-    "Product Operations Analyst",
-    "Business Analyst",
-    "UX Research Intern",
-    "Financial Analyst Intern",
-    "Marketing Analytics Specialist",
-    "Program Coordinator",
-    "Customer Success Associate",
-    "Project Coordinator",
-    "Data Operations Analyst",
-    "People Operations Specialist",
-]
-
-SALARY_RANGES_POOL = [
-    "$166K–$255K (ICT2–3 est.)",
-    "$255K–$346K (ICT3–4 est.)",
-    "$189K–$304K (E3–4 est.)",
-    "$240K–$343K (ICT3–4 est.)",
-    "$176K–$240K (ICT2–3 est.)",
-    "$155K–$220K (L3–4 est.)",
-    "$195K–$275K (L4 est.)",
-    "$145K–$210K (SDE I–II est.)",
-]
-
 
 _WS_RE = re.compile(r"\s+")
 _PAREN_RE = re.compile(r"\([^)]*\)")
@@ -1556,56 +1261,6 @@ def learn_sheet_format_profile(
     return profiles
 
 
-def _build_entity_link_for_column(
-    col_name: str,
-    cell_val: Any,
-    person_name: str,
-    company_name: str,
-    idx: int,
-    is_newsletter: bool = False,
-    is_school: bool = False,
-) -> str:
-    """
-    Builds a realistic informational webpage URL when `put_link` is enabled on a column.
-    """
-    val_str = str(cell_val or "").strip()
-    if not val_str:
-        return ""
-    # Take first bullet item if multi-line bullet cell
-    first_line = val_str.split("\n")[0].replace("•", "").strip()
-    c_up = col_name.strip().upper()
-
-    if c_up in ("NAME", "FULL NAME", "STUDENT NAME", "CANDIDATE", "PERSON", "CONTACT NAME"):
-        if is_newsletter:
-            slug = re.sub(r"[^a-z0-9]+", "-", first_line.split("(")[0].lower()).strip("-")
-            return f"https://{slug}.substack.com"
-        if is_school:
-            slug = re.sub(r"[^a-z0-9]+", "-", first_line.split("—")[0].lower()).strip("-")
-            return f"https://careers.{slug[:28]}.edu"
-        slug = re.sub(r"[^a-z0-9]+", "-", person_name.lower()).strip("-")
-        return f"https://www.linkedin.com/in/{slug}-{(idx % 899) + 100}"
-
-    if "COMPANY" in c_up or "EMPLOYER" in c_up or "ORGANIZATION" in c_up:
-        comp_clean = re.sub(r"[^a-z0-9]", "", first_line.lower()) or "techcompany"
-        return f"https://www.{comp_clean}.com/careers"
-
-    if c_up in ("POSITION", "JOB", "ROLE", "TITLE", "JOB TITLE"):
-        q_role = re.sub(r"[^a-zA-Z0-9]+", "+", first_line).strip("+")
-        q_comp = re.sub(r"[^a-zA-Z0-9]+", "+", company_name).strip("+")
-        return f"https://www.linkedin.com/jobs/search/?keywords={q_role}+{q_comp}"
-
-    if "AREA OF STUDY" in c_up or "MAJOR" in c_up or "DEGREE" in c_up:
-        m_slug = re.sub(r"[^a-z0-9]+", "-", first_line.lower()).strip("-")
-        return f"https://engineering.ucsc.edu/departments/{m_slug}"
-
-    if "SALARY" in c_up or "COMPENSATION" in c_up:
-        comp_slug = re.sub(r"[^a-z0-9]+", "-", company_name.lower()).strip("-")
-        return f"https://www.levels.fyi/companies/{comp_slug}/salaries"
-
-    slug = re.sub(r"[^a-z0-9]+", "-", person_name.lower()).strip("-")
-    return f"https://www.linkedin.com/in/{slug}-{(idx % 899) + 100}"
-
-
 def sanitize_cell_for_gsheets(
     val: Any,
     col: Dict[str, Any],
@@ -1672,7 +1327,7 @@ def format_row_for_gsheets(
     # Preserve hyperlink metadata and merged-group metadata
     if isinstance(raw_row.get("_links"), dict) and raw_row["_links"]:
         formatted["_links"] = dict(raw_row["_links"])
-    for meta_key in ("_group_id", "_group_span", "_group_index"):
+    for meta_key in ("_group_id", "_group_span", "_group_index", "_source"):
         if meta_key in raw_row:
             formatted[meta_key] = raw_row[meta_key]
     return formatted
@@ -1746,461 +1401,204 @@ def _row_matches_column_filters(row: Dict[str, Any], columns: List[Dict[str, Any
     return True
 
 
-def _coerce_value_to_satisfy_filter(val: Any, col: Dict[str, Any], seq_idx: int) -> Any:
-    op = col.get("filter_op", "None")
-    fval = str(col.get("filter_value", "")).strip()
-    dtype = col.get("data_type", "String")
-    if not fval or op == "None":
-        return val
-
-    if dtype == "Number":
-        try:
-            target_num = float(re.sub(r"[^\d.-]", "", fval))
-            is_int = target_num.is_integer() and "." not in fval
-            if op == "Equals":
-                return int(target_num) if is_int else target_num
-            if op == "Less Than":
-                res = target_num - 1 - (seq_idx % 5)
-                return int(res) if is_int else round(res, 2)
-            if op == "Greater Than":
-                res = target_num + 1 + (seq_idx % 5)
-                return int(res) if is_int else round(res, 2)
-        except Exception:
-            pass
-    else:
-        if op == "Equals":
-            return fval
-        if op == "Contains" and fval.lower() not in str(val).lower():
-            return f"{val} ({fval})" if val else fval
-    return val
-
-
-def generate_non_repeating_sheet_rows(
-    project: Dict[str, Any],
-    target_tab: Dict[str, Any],
-    columns: List[Dict[str, Any]],
-    profiles: Dict[str, Dict[str, Any]],
-    dedup: DeduplicationEngine,
-    needed_count: int,
-    query_prompt: str = "",
-) -> List[Dict[str, Any]]:
-    """
-    Generates `needed_count` (up to 1,000) brand-new, unique records formatted
-    identically to the existing Google Sheet / CSV tab without ever repeating
-    existing data or repeating within the generated batch.
-    """
-    if needed_count <= 0:
-        return []
-
-    proj_name_lower = (project.get("name") or "").lower()
-    tab_name_lower = (target_tab.get("name") or "").lower()
-    query_lower = (query_prompt or "").lower()
-
-    is_grad_tab = "grad" in tab_name_lower and "undergrad" not in tab_name_lower
-    is_non_eng_tab = "non-eng" in tab_name_lower or "non eng" in tab_name_lower
-    is_newsletter = "newsletter" in proj_name_lower or "newsletter" in query_lower
-    is_school = ("school" in proj_name_lower or "university" in query_lower or "outreach" in proj_name_lower) and not any(
-        "AREA OF STUDY" in c.get("name", "").upper() for c in columns
-    )
-
-    # Extract any specific company or role or major mentioned in query_prompt
-    prompt_company = None
-    for comp in TECH_COMPANIES_POOL:
-        if comp.lower() in query_lower:
-            prompt_company = comp
-            break
-
-    n_first = len(FIRST_NAMES_POOL)
-    n_last = len(LAST_NAMES_POOL)
-
-    newsletter_prefixes = [
-        "AI", "Tech", "Cloud", "Systems", "Data", "MLOps", "DevOps", "Frontend", "Backend", "Quantum",
-        "Cyber", "Infra", "Agentic", "DeepTech", "Silicon", "Venture", "Product", "Growth", "Engineering", "Code",
-        "Neural", "Autonomous", "Platform", "Distributed", "Scale", "Fintech", "BioTech", "Robotics", "Compiler", "Kernel",
-    ]
-    newsletter_Types = [
-        "Weekly", "Digest", "Briefing", "Insider", "Dispatch", "Chronicle", "Report", "Signal", "Pulse", "Notes",
-        "Journal", "Review", "Bulletin", "Radar", "Horizon", "Index", "Ledger", "Stack", "Wire", "Letter",
-    ]
-    university_prefixes = [
-        "Stanford University", "Carnegie Mellon University", "Massachusetts Institute of Technology",
-        "University of Illinois Urbana-Champaign", "University of Washington", "Cornell University",
-        "University of Michigan", "University of California, Los Angeles", "University of California, San Diego",
-        "University of California, Santa Cruz", "University of California, Davis", "University of California, Irvine",
-        "University of California, Santa Barbara", "Purdue University", "University of Wisconsin-Madison",
-        "University of Maryland", "Columbia University", "New York University", "University of Pennsylvania",
-        "Princeton University", "Harvard University", "Yale University", "Brown University", "Duke University",
-        "Northwestern University", "Rice University", "Vanderbilt University", "Johns Hopkins University",
-        "University of Southern California", "California Institute of Technology", "Harvey Mudd College",
-        "Virginia Tech", "North Carolina State University", "Ohio State University", "Penn State University",
-        "University of Minnesota", "University of Massachusetts Amherst", "Rutgers University",
-        "Arizona State University", "University of Arizona", "University of Colorado Boulder",
-        "University of Utah", "Oregon State University", "University of Oregon", "Boston University",
-        "Northeastern University", "Tufts University", "Rensselaer Polytechnic Institute",
-        "Rochester Institute of Technology", "Case Western Reserve University",
-    ]
-    career_programs = [
-        "Engineering Career Services", "Computer Science Employer Relations", "STEM Talent Partnerships",
-        "University Recruiting & Co-op Center", "AI & Data Science Industry Lab", "Early Talent & Internship Office",
-        "School of Engineering Corporate Liaison", "Student Technical Leadership Council", "Career & Professional Development",
-        "Experiential Learning & Fellowships", "Undergraduate Research & Industry Hub", "Graduate Technical Placement Office",
-    ]
-
-    generated: List[Dict[str, Any]] = []
-    attempt = 0
-    max_attempts = max(needed_count * 12, 5000)
-
-    retrieve_cols = [c for c in columns if c.get("retrieve_all")]
-    any_retrieve_all = len(retrieve_cols) > 0
-    retrieve_mode: Literal["bullet_points", "more_rows"] = (
-        "more_rows"
-        if any(c.get("retrieve_all_mode") == "more_rows" for c in retrieve_cols)
-        else "bullet_points"
-    )
-
-    def _is_identity_merged_col(col_obj: Dict[str, Any], col_idx: int) -> bool:
-        c_up = col_obj.get("name", "").strip().upper()
-        if any(
-            k in c_up
-            for k in (
-                "COMPANY",
-                "EMPLOYER",
-                "ORGANIZATION",
-                "POSITION",
-                "JOB",
-                "ROLE",
-                "TITLE",
-                "SALARY",
-                "COMPENSATION",
-                "PAY",
-                "NOTE",
-                "LOCATION",
-                "CITY",
-            )
-        ):
-            return False
-        if col_idx == 0:
-            return True
-        if any(
-            k in c_up
-            for k in (
-                "NAME",
-                "STUDENT",
-                "CANDIDATE",
-                "PERSON",
-                "AREA OF STUDY",
-                "MAJOR",
-                "DEGREE",
-                "GRAD YEAR",
-                "GRADUATION",
-                "COHORT",
-                "EMAIL",
-            )
-        ):
-            return True
-        if c_up == "YEAR":
-            return True
-        return False
-
-    # Check if user only checked `retrieve_all` on identity columns (e.g. NAME) intending sector history
-    non_identity_retrieve_cols = [
-        c.get("name", "").strip().upper()
-        for idx_c, c in enumerate(columns)
-        if c.get("retrieve_all") and not _is_identity_merged_col(c, idx_c)
-    ]
-
-    flagship_sector_companies = [
-        "Apple", "Microsoft", "Google", "Amazon", "NVIDIA", "Meta", "Cisco",
-        "Salesforce", "Adobe", "Databricks", "Stripe", "OpenAI", "AMD", "Intel",
-    ]
-
-    while len(generated) < needed_count and attempt < max_attempts:
-        idx = attempt
-        attempt += 1
-
-        # Deterministic, prime-strided combination across 500 x 500 names = 250,000 unique full names
-        f_idx = (idx * 37 + 11) % n_first
-        l_idx = (idx * 73 + (idx // n_first) * 19 + 5) % n_last
-        person_name = f"{FIRST_NAMES_POOL[f_idx]} {LAST_NAMES_POOL[l_idx]}"
-
-        if is_non_eng_tab:
-            row_major = NON_ENG_MAJORS_POOL[idx % len(NON_ENG_MAJORS_POOL)]
-        else:
-            row_major = UNDERGRAD_MAJORS_POOL[idx % len(UNDERGRAD_MAJORS_POOL)]
-
-        if is_grad_tab:
-            grad_years = ["2025", "2026", "2026 (Masters)", "PhD Candidate", "2025 (Masters)", "2024 (PhD)", "2027 (PhD)"]
-            row_grad_year = grad_years[idx % len(grad_years)]
-        else:
-            undergrad_years = ["2023", "2024", "2025", "2026", "2022", "2027"]
-            row_grad_year = undergrad_years[idx % len(undergrad_years)]
-
-        # Build a multi-entry career/sector history for this person (3 to 4 roles across distinct companies)
-        history_len = 3 + (idx % 2) if any_retrieve_all else 1
-        history_entries: List[Dict[str, str]] = []
-        used_comps: set[str] = set()
-
-        for h_i in range(history_len):
-            if h_i == 0 and prompt_company:
-                comp_i = prompt_company
-            elif h_i < 3:
-                comp_i = flagship_sector_companies[(idx * 3 + h_i * 5) % len(flagship_sector_companies)]
-            else:
-                comp_i = TECH_COMPANIES_POOL[(idx * 13 + h_i * 17 + 3) % len(TECH_COMPANIES_POOL)]
-            if comp_i in used_comps:
-                comp_i = TECH_COMPANIES_POOL[(idx * 19 + h_i * 23 + 7) % len(TECH_COMPANIES_POOL)]
-            used_comps.add(comp_i)
-
-            # Progression: e.g., current/recent Employment roles + earlier Employment/Internship
-            if h_i < history_len - 1:
-                jt_i = "Employment"
-            else:
-                jt_i = "Internship" if (idx + h_i) % 2 == 0 else "Employment"
-
-            if is_non_eng_tab:
-                pos_i = NON_ENG_POSITIONS_POOL[(idx + h_i * 3) % len(NON_ENG_POSITIONS_POOL)]
-                if jt_i == "Internship" and "Intern" not in pos_i:
-                    pos_i = f"{pos_i} Intern"
-            else:
-                if jt_i == "Internship":
-                    pos_i = INTERN_POSITIONS_POOL[(idx + h_i * 5) % len(INTERN_POSITIONS_POOL)]
-                else:
-                    pos_i = FULLTIME_POSITIONS_POOL[(idx + h_i * 7) % len(FULLTIME_POSITIONS_POOL)]
-
-            city_i = US_CITIES_POOL[(idx * 7 + h_i * 3) % len(US_CITIES_POOL)]
-            sal_i = (
-                SALARY_RANGES_POOL[(idx + h_i) % len(SALARY_RANGES_POOL)]
-                if (jt_i == "Employment" and (idx + h_i) % 2 == 0)
-                else ""
-            )
-            if is_grad_tab:
-                grad_notes_pool = [
-                    "M.S. Computer Science, UCSC",
-                    "Ph.D. Computer Science, UCSC",
-                    "M.S. Electrical and Computer Engineering, UCSC",
-                    "M.S. Human Computer Interaction, UCSC",
-                    "M.S. Natural Language Processing, UCSC",
-                    "M.S. Computer Science and Engineering, UCSC",
-                    "",
-                ]
-                note_i = grad_notes_pool[idx % len(grad_notes_pool)] if h_i == 0 else ""
-            else:
-                note_i = "Multiple positions held." if (any_retrieve_all and h_i == 0) else ""
-
-            history_entries.append({
-                "company": comp_i,
-                "job_type": jt_i,
-                "position": pos_i,
-                "city": city_i,
-                "salary": sal_i,
-                "note": note_i,
-            })
-
-        def _build_single_entry_val(col_obj: Dict[str, Any], entry: Dict[str, str], sub_i: int) -> Any:
-            c_name = col_obj.get("name", "")
-            c_up = c_name.strip().upper()
-            c_dtype = col_obj.get("data_type", "String")
-            prof = profiles.get(c_name, {})
-            top_vals = [
-                v for v in prof.get("top_values", [])
-                if "UCSC" not in v.upper() and "SANTA CRUZ" not in v.upper()
-            ]
-
-            row_company = entry["company"]
-            row_job_type = entry["job_type"]
-            row_position = entry["position"]
-            row_city = entry["city"]
-            row_salary = entry["salary"]
-            row_note = entry["note"]
-
-            val: Any = ""
-            if c_up in ("NAME", "FULL NAME", "STUDENT NAME", "CANDIDATE", "PERSON", "CONTACT NAME"):
-                if is_newsletter and c_up == "NAME":
-                    p1 = newsletter_prefixes[idx % len(newsletter_prefixes)]
-                    p2 = newsletter_Types[(idx // len(newsletter_prefixes)) % len(newsletter_Types)]
-                    val = f"{p1} {p2} (by {person_name})"
-                elif is_school and c_up == "NAME":
-                    u_name = university_prefixes[idx % len(university_prefixes)]
-                    prog = career_programs[(idx // len(university_prefixes)) % len(career_programs)]
-                    val = f"{u_name} — {prog} ({person_name})"
-                else:
-                    val = person_name
-            elif "AREA OF STUDY" in c_up or "MAJOR" in c_up or "DEGREE" in c_up:
-                if top_vals:
-                    val = top_vals[idx % len(top_vals)]
-                else:
-                    val = row_major
-            elif "GRAD YEAR" in c_up or "GRADUATION" in c_up or c_up == "COHORT":
-                if c_dtype == "Number":
-                    val = int(re.sub(r"[^\d]", "", row_grad_year[:4]) or 2026)
-                else:
-                    val = row_grad_year
-            elif c_up == "YEAR":
-                if is_newsletter:
-                    val = 2018 + ((idx + sub_i) % 9)
-                elif is_school:
-                    val = 2026 + ((idx + sub_i) % 3)
-                else:
-                    val = 2021 + ((idx + sub_i) % 6)
-                if c_dtype != "Number":
-                    val = str(val)
-            elif "COMPANY" in c_up or "EMPLOYER" in c_up or "ORGANIZATION" in c_up:
-                val = row_company
-            elif "JOB TYPE" in c_up or "EMPLOYMENT TYPE" in c_up:
-                val = row_job_type
-            elif c_up in ("POSITION", "JOB", "ROLE", "TITLE", "JOB TITLE"):
-                if is_newsletter:
-                    val = f"{newsletter_prefixes[(idx + sub_i) % len(newsletter_prefixes)]} Engineers & Technical Leaders"
-                elif is_school:
-                    val = career_programs[(idx + sub_i) % len(career_programs)]
-                else:
-                    val = row_position
-            elif "SALARY" in c_up or "COMPENSATION" in c_up or "PAY" in c_up:
-                val = row_salary
-            elif c_up in ("NOTES", "NOTE", "COMMENTS", "REMARKS"):
-                val = row_note
-            elif "LOCATION" in c_up or "CITY" in c_up or "REGION" in c_up or "HQ" in c_up:
-                val = row_city
-            elif "EMAIL" in c_up:
-                slug = re.sub(r"[^a-z0-9]", ".", person_name.lower()).strip(".")
-                dom = re.sub(r"[^a-z0-9]", "", row_company.lower()) or "techcorp"
-                val = f"{slug}@{dom}.com"
-            elif "LINK" in c_up or "URL" in c_up or "WEBSITE" in c_up or "LINKEDIN" in c_up:
-                slug = re.sub(r"[^a-z0-9]", "-", person_name.lower()).strip("-")
-                val = f"https://www.linkedin.com/in/{slug}-{(idx % 899) + 100}"
-            elif "DATE" in c_up or c_dtype == "Date":
-                month = (((idx + sub_i) % 12) + 1)
-                day = (((idx + sub_i) % 28) + 1)
-                d_pat = prof.get("date_pattern", "YYYY-MM-DD")
-                if d_pat == "MM/DD/YYYY":
-                    val = f"{month:02d}/{day:02d}/2026"
-                elif d_pat == "MM/DD/YY":
-                    val = f"{month:02d}/{day:02d}/26"
-                else:
-                    val = f"2026-{month:02d}-{day:02d}"
-            elif c_dtype == "Number":
-                val = 2022 + ((idx + sub_i) % 6)
-            elif prof.get("is_categorical") and top_vals:
-                val = top_vals[(idx + sub_i) % len(top_vals)]
-            elif top_vals and len(top_vals) >= 3:
-                val = top_vals[(idx + sub_i) % len(top_vals)]
-            else:
-                val = f"{row_position} ({row_company})"
-
-            return _coerce_value_to_satisfy_filter(val, col_obj, idx + sub_i)
-
-        # Case 1: Single row per entity (either retrieve_all is False OR retrieve_mode == "bullet_points")
-        if not any_retrieve_all or retrieve_mode == "bullet_points":
-            candidate: Dict[str, Any] = {}
-            links_map: Dict[str, str] = {}
-
-            for col_idx, col in enumerate(columns):
-                c_name = col.get("name", "")
-                c_up = c_name.strip().upper()
-                prof = profiles.get(c_name, {})
-                is_id_col = _is_identity_merged_col(col, col_idx)
-
-                should_bullet = bool(col.get("retrieve_all")) and not is_id_col
-                if (
-                    any_retrieve_all
-                    and not non_identity_retrieve_cols
-                    and not is_id_col
-                    and any(
-                        k in c_up
-                        for k in ("COMPANY", "EMPLOYER", "ORGANIZATION", "POSITION", "JOB", "ROLE", "TITLE")
-                    )
-                ):
-                    # User checked Retrieve All on the Main/Name column intending sector columns to show all items
-                    should_bullet = True
-
-                if should_bullet and len(history_entries) > 1:
-                    bullet_items: List[str] = []
-                    for s_i, ent in enumerate(history_entries):
-                        v_item = str(_build_single_entry_val(col, ent, s_i) or "").strip()
-                        if v_item and f"• {v_item}" not in bullet_items:
-                            bullet_items.append(f"• {v_item}")
-                    raw_val = "\n".join(bullet_items)
-                    candidate[c_name] = sanitize_cell_for_gsheets(raw_val, col, prof, allow_multiline=True)
-                else:
-                    raw_val = _build_single_entry_val(col, history_entries[0], 0)
-                    candidate[c_name] = sanitize_cell_for_gsheets(raw_val, col, prof, allow_multiline=False)
-
-                if col.get("put_link") and str(candidate[c_name]).strip():
-                    links_map[c_name] = _build_entity_link_for_column(
-                        c_name,
-                        candidate[c_name],
-                        person_name,
-                        history_entries[0]["company"],
-                        idx,
-                        is_newsletter=is_newsletter,
-                        is_school=is_school,
-                    )
-
-            if links_map:
-                candidate["_links"] = links_map
-
-            formatted_candidate = format_row_for_gsheets(candidate, columns, profiles)
-            if not _row_matches_column_filters(formatted_candidate, columns):
-                continue
-            if dedup.accept(formatted_candidate):
-                generated.append(formatted_candidate)
-
-        # Case 2: Multi-row merged block per entity (retrieve_mode == "more_rows")
-        else:
-            remaining_slots = needed_count - len(generated)
-            span = min(len(history_entries), max(1, remaining_slots))
-            group_id = f"grp-{idx}-{uuid.uuid4().hex[:6]}"
-            group_rows: List[Dict[str, Any]] = []
-
-            for sub_i in range(span):
-                ent = history_entries[sub_i]
-                sub_row: Dict[str, Any] = {
-                    "_group_id": group_id,
-                    "_group_span": span,
-                    "_group_index": sub_i,
-                }
-                sub_links: Dict[str, str] = {}
-
-                for col_idx, col in enumerate(columns):
-                    c_name = col.get("name", "")
-                    prof = profiles.get(c_name, {})
-                    is_id_col = _is_identity_merged_col(col, col_idx)
-
-                    if sub_i > 0 and is_id_col:
-                        # Continuation row in a merged block: blank in identity columns (merges with row 0)
-                        sub_row[c_name] = ""
-                    else:
-                        raw_val = _build_single_entry_val(col, ent, sub_i)
-                        sub_row[c_name] = sanitize_cell_for_gsheets(raw_val, col, prof, allow_multiline=False)
-                        if col.get("put_link") and str(sub_row[c_name]).strip():
-                            sub_links[c_name] = _build_entity_link_for_column(
-                                c_name,
-                                sub_row[c_name],
-                                person_name,
-                                ent["company"],
-                                idx + sub_i,
-                                is_newsletter=is_newsletter,
-                                is_school=is_school,
-                            )
-
-                if sub_links:
-                    sub_row["_links"] = sub_links
-                group_rows.append(format_row_for_gsheets(sub_row, columns, profiles))
-
-            # Validate filter & deduplication on the head row of the merged group
-            if not _row_matches_column_filters(group_rows[0], columns):
-                continue
-            if dedup.accept(group_rows[0]):
-                for cont_r in group_rows[1:]:
-                    dedup.register_existing(cont_r)
-                generated.extend(group_rows)
-
-    return generated
-
-
 # ---------------------------------------------------------------------------
 # Agentic AI Scraper Engine (Gemini 3.8 Flash / Antigravity Agent / Gemini 4 Argon)
 # ---------------------------------------------------------------------------
+
+# Fetches run as many small model calls (FETCH_BATCH_SIZE rows each) instead of one huge response,
+# so a 1000-row request never depends on the model emitting hundreds of rows at once.
+FETCH_BATCH_SIZE = max(1, int(os.getenv("FETCH_BATCH_SIZE", "10")))
+FETCH_CONCURRENCY = max(1, int(os.getenv("FETCH_CONCURRENCY", "4")))
+# Must stay below the Cloud Function timeout in main.py so partial results are still returned and saved.
+FETCH_TIME_BUDGET_SEC = float(os.getenv("FETCH_TIME_BUDGET_SEC", "480"))
+# Consecutive low-yield rounds before the direct query is considered exhausted.
+FETCH_MAX_DRY_ROUNDS = 2
+FETCH_MAX_ERROR_ROUNDS = 2
+FETCH_EXCLUDE_LIST_LIMIT = 250
+FETCH_SEEDS_PER_ANGLE = 5
+
+_DIRECT_SEARCH_ANGLES = [
+    "",
+    "Prioritize lesser-known entries that a quick search would miss.",
+    "Prioritize curated lists, directories, and databases over top search results.",
+    "Prioritize recent entries (the last 1-2 years).",
+    "Prioritize entries from different regions or sub-categories than the obvious ones.",
+    "Prioritize official sources (organization websites, institution pages, public registries).",
+]
+
+_STOP_REASON_TEXT = {
+    "target_reached": "Requested row count reached.",
+    "exhausted": "Search exhausted: the direct query and the Main-column expansion searches stopped finding new verifiable records.",
+    "time_budget": "Stopped at the time limit for one run; run Fetch again to continue (already-found rows are skipped).",
+    "api_error": "Stopped because the AI provider kept returning errors.",
+    "no_api_key": "No Gemini API key configured, so no data could be fetched.",
+}
+
+
+def _main_columns(columns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [c for c in columns if c.get("query_type") == "Main" and c.get("name")] or columns[:1]
+
+
+def _entity_values(rows: List[Dict[str, Any]], col_name: str) -> List[str]:
+    """Unique, short, non-empty values of one column in row order."""
+    seen: set[str] = set()
+    out: List[str] = []
+    for r in rows:
+        v = str(r.get(col_name, "") or "").strip()
+        key = _normalize_entity_str(v)
+        if v and len(v) < 60 and key not in seen:
+            seen.add(key)
+            out.append(v)
+    return out
+
+
+def _build_expansion_angles(
+    columns: List[Dict[str, Any]],
+    profiles: Dict[str, Dict[str, Any]],
+    known_rows: List[Dict[str, Any]],
+    used_keys: set[str],
+) -> List[str]:
+    """
+    Search angles used once the direct query runs dry: first new values for each Main column
+    seeded from the entities already known, then records matching observed Attribute values.
+    """
+    main_cols = _main_columns(columns)
+    angles: List[str] = []
+    for col in main_cols:
+        name = col["name"]
+        instr = (col.get("special_instructions") or "").strip()
+        rules = f" Column rules: {instr}" if instr else ""
+        seeds = [s for s in _entity_values(known_rows, name) if f"seed:{name}:{_normalize_entity_str(s)}" not in used_keys]
+        for i in range(0, len(seeds), FETCH_SEEDS_PER_ANGLE):
+            group = seeds[i:i + FETCH_SEEDS_PER_ANGLE]
+            used_keys.update(f"seed:{name}:{_normalize_entity_str(s)}" for s in group)
+            angles.append(
+                f'Expand on the Main column "{name}": find NEW "{name}" entries closely related to these known ones '
+                f"(peers, competitors, same category, or listed alongside them in the same sources): "
+                f"{', '.join(group)}.{rules}"
+            )
+        generic_key = f"generic:{name}"
+        if generic_key not in used_keys:
+            used_keys.add(generic_key)
+            angles.append(
+                f'Expand on the Main column "{name}": search specifically for new "{name}" entries using different '
+                f"search terms, sources, and listings than a generic query would.{rules}"
+            )
+
+    main_names = {c["name"] for c in main_cols}
+    for col in columns:
+        name = col.get("name", "")
+        if not name or name in main_names:
+            continue
+        for v in (profiles.get(name, {}).get("top_values") or [])[:4]:
+            v_str = str(v).strip()
+            key = f"attr:{name}:{_normalize_entity_str(v_str)}"
+            if v_str and len(v_str) < 60 and key not in used_keys:
+                used_keys.add(key)
+                angles.append(f'Find new records whose "{name}" is "{v_str}".')
+    return angles
+
+
+def _batch_task_prompt(batch_size: int, angle: str, exclude: List[str], source_names: str) -> str:
+    return f"""
+Already Collected (DO NOT RETURN ANY OF THESE):
+{', '.join(exclude) if exclude else 'None'}
+
+Task for this batch:
+1. Search the web and prioritized sources ({source_names}) for up to {batch_size} real records that are NOT already collected or in the existing data.
+{f"2. Search focus: {angle}" if angle else "2. Search focus: the user's scraping goal above."}
+3. Every record must come from a real page you actually found. Put that page's URL in `_source_url`.
+4. If you cannot verify a column's value from a source, return an empty string for it. Never guess, estimate, or invent names, values, or URLs.
+5. For `_links`, only include URLs you actually found; use an empty string otherwise. Never construct a URL from a name.
+6. Returning fewer than {batch_size} records, or zero, is correct when no more verifiable records exist.
+7. Format every cell to match the Google Sheet conventions above. Return JSON matching the schema.
+"""
+
+
+def _run_fetch_batch(
+    client: "genai.Client",
+    agent_mode: str,
+    prompt: str,
+    output_json_schema: Dict[str, Any],
+    tools_config: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], str]:
+    """One blocking model call for a single small batch. Run via asyncio.to_thread."""
+    if agent_mode == "antigravity-agent":
+        agent_interaction = client.interactions.create(
+            agent="antigravity-preview-09-2026",
+            input=prompt + "\nOutput ONLY valid JSON matching the schema.",
+            environment="remote",
+            tools=[{"type": "google_search"}, {"type": "url_context"}],
+        )
+        raw_text = agent_interaction.output_text or ""
+        struct_interaction = client.interactions.create(
+            model="gemini-3.8-flash",
+            input=(
+                "Convert the following agent research findings into the exact JSON schema. "
+                "Do not add any record, value, or URL that is not in the findings:\n\n" + raw_text
+            ),
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": output_json_schema,
+            },
+        )
+        return json.loads(struct_interaction.output_text), "antigravity-preview-09-2026 + gemini-3.8-flash"
+
+    target_model = "gemini-4-argon" if agent_mode == "gemini-4-argon" else "gemini-3.8-flash"
+    interaction = client.interactions.create(
+        model=target_model,
+        input=prompt,
+        tools=tools_config,
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": output_json_schema,
+        },
+    )
+    return json.loads(interaction.output_text), target_model
+
+
+def _expand_more_rows(
+    row: Dict[str, Any],
+    columns: List[Dict[str, Any]],
+    profiles: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Splits bullet-list cells of `retrieve_all_mode == "more_rows"` columns into a vertically merged
+    block: row 0 carries every column, continuation rows carry only the next list item.
+    """
+    more_cols = [
+        c["name"] for c in columns
+        if c.get("retrieve_all") and c.get("retrieve_all_mode") == "more_rows" and c.get("name")
+    ]
+    if not more_cols:
+        return [row]
+    items = {
+        n: [ln.strip().lstrip("•-*").strip() for ln in str(row.get(n, "") or "").split("\n") if ln.strip()]
+        for n in more_cols
+    }
+    span = max((len(v) for v in items.values()), default=0)
+    if span <= 1:
+        return [row]
+
+    group_id = f"grp-{uuid.uuid4().hex[:8]}"
+    block: List[Dict[str, Any]] = []
+    for i in range(span):
+        sub: Dict[str, Any] = {"_group_id": group_id, "_group_span": span, "_group_index": i}
+        for c in columns:
+            n = c.get("name", "")
+            if n in items:
+                sub[n] = items[n][i] if i < len(items[n]) else ""
+            else:
+                sub[n] = row.get(n, "") if i == 0 else ""
+        if i == 0:
+            for meta_key in ("_links", "_source"):
+                if row.get(meta_key):
+                    sub[meta_key] = row[meta_key]
+        block.append(format_row_for_gsheets(sub, columns, profiles))
+    return block
+
 
 async def run_agentic_scraper(
     project: Dict[str, Any],
@@ -2277,17 +1675,12 @@ async def run_agentic_scraper(
         if any(str(v).strip() for v in r.values())
     ][:8]
 
-    # Sample existing main entities to explicitly warn the LLM against repeating
-    main_col_name = columns[0].get("name", "Name") if columns else "Name"
-    existing_entity_samples = [
-        str(r.get(main_col_name, "")).strip()
-        for r in tab_existing_rows
-        if str(r.get(main_col_name, "")).strip() and len(str(r.get(main_col_name, "")).strip()) < 60
-    ][:40]
+    main_col_name = _main_columns(columns)[0].get("name", "Name") if columns else "Name"
 
     row_properties: Dict[str, Any] = {}
     required_cols: List[str] = []
     column_descriptions: List[str] = []
+    link_properties: Dict[str, Any] = {}
 
     for col in columns:
         c_name = col.get("name", "Column")
@@ -2299,16 +1692,18 @@ async def run_agentic_scraper(
         c_filter_val = col.get("filter_value", "")
         prof = profiles.get(c_name, {})
 
-        json_type = "number" if c_dtype == "Number" else "string"
-
         desc_parts = [f"Query Type: {c_qtype}", f"Data Type: {c_dtype}"]
         if c_instr:
             desc_parts.append(f"Special Instructions: {c_instr}")
         if col.get("put_link"):
-            desc_parts.append("Put Link: Enabled (include entity profile/company webpage URL)")
+            desc_parts.append("Put Link: Enabled (put the real source URL for this value in `_links`)")
+            link_properties[c_name] = {
+                "type": "string",
+                "description": f"Real URL for the `{c_name}` value as found in sources; empty string if none was found.",
+            }
         if col.get("retrieve_all"):
             mode_label = (
-                "More Rows (Vertically Merged Rows)"
+                "list every item as bullet lines (• Item 1\\n• Item 2); each item becomes its own merged row"
                 if col.get("retrieve_all_mode") == "more_rows"
                 else "Bullet Points (• Item 1\\n• Item 2)"
             )
@@ -2319,22 +1714,32 @@ async def run_agentic_scraper(
             desc_parts.append(f"Must satisfy filter: {c_filter_op} '{c_filter_val}'")
         if c_sort:
             desc_parts.append(f"Sort preference: {c_sort}")
+        desc_parts.append("Empty string if not verifiable")
 
         full_desc = " | ".join(desc_parts)
+        # Always a string so an unverifiable Number can be left blank instead of forced to a made-up value;
+        # sanitize_cell_for_gsheets converts numeric strings back to numbers.
         row_properties[c_name] = {
-            "type": json_type,
+            "type": "string",
             "description": full_desc,
         }
         required_cols.append(c_name)
         column_descriptions.append(f"- `{c_name}` ({full_desc})")
 
-    ai_batch_target = min(requested_count, 50)
+    row_properties["_source_url"] = {
+        "type": "string",
+        "description": "URL of the page where this record was found and verified. Required.",
+    }
+    required_cols.append("_source_url")
+    if link_properties:
+        row_properties["_links"] = {"type": "object", "properties": link_properties}
+
     output_json_schema = {
         "type": "object",
         "properties": {
             "rows": {
                 "type": "array",
-                "description": f"List of {ai_batch_target} brand-new, non-duplicate data records formatted identically to the Google Sheet.",
+                "description": "Brand-new, non-duplicate, source-verified records formatted identically to the Google Sheet. May be empty.",
                 "items": {
                     "type": "object",
                     "properties": row_properties,
@@ -2343,7 +1748,7 @@ async def run_agentic_scraper(
             },
             "agent_summary": {
                 "type": "string",
-                "description": "Brief summary of how the agent scraped, verified, deduplicated, and formatted the new data.",
+                "description": "Brief summary of how the agent searched, verified, and formatted this batch.",
             },
             "sources_consulted": {
                 "type": "array",
@@ -2360,134 +1765,173 @@ async def run_agentic_scraper(
     if found_urls:
         scraped_web_context = await scrape_urls_context(found_urls)
 
-    prompt = f"""You are an enterprise Agentic AI Data Mining & Web Scraping specialist.
+    source_names = ', '.join(mcp_names) if mcp_names else 'Web'
+    base_prompt = f"""You are an enterprise Agentic AI Data Mining & Web Scraping specialist. Accuracy matters more than volume: only return real, verifiable data.
 Project Name: "{project.get('name', 'Data Mining Project')}"
 Target Google Sheet Tab: "{effective_tab.get('name', 'Tab 1')}"
-User Scraping Goal / Prompt: "{query_prompt or f'Produce {ai_batch_target} brand-new records for {project.get("name", "this project")} ({effective_tab.get("name", "Tab 1")}) matching the exact Google Sheet format.'}"
+User Scraping Goal / Prompt: "{query_prompt or f'Find real records for {project.get("name", "this project")} ({effective_tab.get("name", "Tab 1")}) matching the exact Google Sheet format.'}"
 Active MCP / Source Connectors prioritized: {', '.join(mcp_names) if mcp_names else 'General Web Search'}
 
 Existing Sample Rows Seen in Google Sheet "{effective_tab.get('name', 'Tab 1')}" (MATCH THIS EXACT COLUMN FORMAT, STYLE, AND VALUE CONVENTIONS):
 {json.dumps(sample_existing_rows[:6], indent=2)}
 
-Existing Entities Already in Sheet (CRITICAL: DO NOT REPEAT ANY OF THESE OR ANY EXISTING DATA):
-{', '.join(existing_entity_samples) if existing_entity_samples else 'None'}
-
 Data Template Columns & Learned Google Sheet Formatting Rules:
 {chr(10).join(column_descriptions)}
 
 {f"Direct Web Page Context Scraped from Target URLs:{chr(10)}{scraped_web_context}" if scraped_web_context else ""}
-
-Task:
-1. Search the web and prioritized ecosystems ({', '.join(mcp_names) if mcp_names else 'Web'}) to gather {ai_batch_target} brand-new, real-world records for "{project.get('name')}" -> tab "{effective_tab.get('name')}".
-2. NEVER repeat any record or person/entity that already exists in the Existing Data. Produce ONLY new data.
-3. Format every cell so it matches the exact conventions seen in the Google Sheet above, ready to paste directly into Google Sheets.
-4. Return the result strictly as JSON matching the required schema with `rows`, `agent_summary`, and `sources_consulted`.
 """
 
     api_key = (override_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     accepted_new_rows: List[Dict[str, Any]] = []
-    sources_consulted: List[str] = list(mcp_names) if mcp_names else ["Web Search"]
+    sources_consulted: List[str] = []
     model_used = agent_mode
-    live_ai = False
-    ai_note = ""
+    stop_reason = "no_api_key"
+    batches_run = 0
+    last_error = ""
 
-    any_retrieve_all_req = any(bool(c.get("retrieve_all")) for c in columns)
-    if api_key and requested_count <= 60 and not any_retrieve_all_req:
-        try:
-            client = genai.Client(api_key=api_key)
+    def _accept(raw: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return []
+        source_url = str(raw.get("_source_url") or "").strip()
+        if not source_url.startswith("http"):
+            return []
+        formatted_r = format_row_for_gsheets(raw, columns, profiles)
+        if not str(formatted_r.get(main_col_name, "") or "").strip():
+            return []
+        raw_links = raw.get("_links") if isinstance(raw.get("_links"), dict) else {}
+        links_for_r = {
+            c["name"]: str(raw_links.get(c["name"], "")).strip()
+            for c in columns
+            if c.get("put_link")
+            and str(formatted_r.get(c["name"], "")).strip()
+            and str(raw_links.get(c["name"], "")).strip().startswith("http")
+        }
+        if links_for_r:
+            formatted_r["_links"] = links_for_r
+        formatted_r["_source"] = source_url
+        if not _row_matches_column_filters(formatted_r, columns) or not dedup.accept(formatted_r):
+            return []
+        block = _expand_more_rows(formatted_r, columns, profiles)
+        for cont_r in block[1:]:
+            dedup.register_existing(cont_r)
+        return block
 
-            tools_config: List[Dict[str, Any]] = [
-                {"type": "google_search"},
-                {"type": "url_context"},
+    if api_key:
+        client = genai.Client(api_key=api_key)
+
+        tools_config: List[Dict[str, Any]] = [
+            {"type": "google_search"},
+            {"type": "url_context"},
+        ]
+        for m in enabled_mcps:
+            srv_url = (m.get("server_url") or "").strip()
+            if srv_url.startswith("http"):
+                tools_config.append({
+                    "type": "mcp_server",
+                    "name": re.sub(r"[^a-zA-Z0-9_-]", "_", m.get("name", "custom_mcp").lower()),
+                    "url": srv_url,
+                })
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FETCH_TIME_BUDGET_SEC
+        phase = "direct"
+        direct_angle_idx = 0
+        expansion_angles: List[str] = []
+        used_expansion_keys: set[str] = set()
+        dry_rounds = 0
+        error_rounds = 0
+
+        while True:
+            remaining = requested_count - len(accepted_new_rows)
+            if remaining <= 0:
+                stop_reason = "target_reached"
+                break
+            if loop.time() >= deadline:
+                stop_reason = "time_budget"
+                break
+
+            # Phase 2: once the direct query runs dry, search outward from the Main columns' entities.
+            if phase == "expand" and not expansion_angles:
+                expansion_angles = _build_expansion_angles(
+                    columns, profiles, accepted_new_rows + all_existing_rows, used_expansion_keys
+                )
+                if not expansion_angles:
+                    stop_reason = "exhausted"
+                    break
+
+            n_calls = min(FETCH_CONCURRENCY, -(-remaining // FETCH_BATCH_SIZE))
+            batch_plan: List[Tuple[int, str]] = []
+            to_assign = remaining
+            for _ in range(n_calls):
+                if phase == "direct":
+                    angle = _DIRECT_SEARCH_ANGLES[direct_angle_idx % len(_DIRECT_SEARCH_ANGLES)]
+                    direct_angle_idx += 1
+                elif expansion_angles:
+                    angle = expansion_angles.pop(0)
+                else:
+                    break
+                size = min(FETCH_BATCH_SIZE, to_assign)
+                to_assign -= size
+                batch_plan.append((size, angle))
+
+            exclude = []
+            for v in _entity_values(accepted_new_rows[::-1] + all_existing_rows, main_col_name):
+                exclude.append(v)
+                if len(exclude) >= FETCH_EXCLUDE_LIST_LIMIT:
+                    break
+
+            futures = [
+                asyncio.ensure_future(asyncio.to_thread(
+                    _run_fetch_batch,
+                    client,
+                    agent_mode,
+                    base_prompt + _batch_task_prompt(size, angle, exclude, source_names),
+                    output_json_schema,
+                    tools_config,
+                ))
+                for size, angle in batch_plan
             ]
-            for m in enabled_mcps:
-                srv_url = (m.get("server_url") or "").strip()
-                if srv_url.startswith("http"):
-                    tools_config.append({
-                        "type": "mcp_server",
-                        "name": re.sub(r"[^a-zA-Z0-9_-]", "_", m.get("name", "custom_mcp").lower()),
-                        "url": srv_url,
-                    })
+            done, pending = await asyncio.wait(futures, timeout=max(1.0, deadline - loop.time()))
+            for f in pending:
+                f.cancel()
 
-            if agent_mode == "antigravity-agent":
-                agent_interaction = client.interactions.create(
-                    agent="antigravity-preview-09-2026",
-                    input=prompt + "\nOutput ONLY valid JSON matching the schema.",
-                    environment="remote",
-                    tools=[{"type": "google_search"}, {"type": "url_context"}],
-                )
-                raw_text = agent_interaction.output_text or ""
-                struct_interaction = client.interactions.create(
-                    model="gemini-3.8-flash",
-                    input=f"Convert the following agent research findings into the exact JSON schema:\n\n{raw_text}",
-                    response_format={
-                        "type": "text",
-                        "mime_type": "application/json",
-                        "schema": output_json_schema,
-                    },
-                )
-                parsed = json.loads(struct_interaction.output_text)
-                model_used = "antigravity-preview-09-2026 + gemini-3.8-flash"
-            else:
-                target_model = "gemini-4-argon" if agent_mode == "gemini-4-argon" else "gemini-3.8-flash"
-                interaction = client.interactions.create(
-                    model=target_model,
-                    input=prompt,
-                    tools=tools_config,
-                    response_format={
-                        "type": "text",
-                        "mime_type": "application/json",
-                        "schema": output_json_schema,
-                    },
-                )
-                parsed = json.loads(interaction.output_text)
-                model_used = target_model
-
-            raw_ai_rows = parsed.get("rows", [])
-            for ai_idx, r in enumerate(raw_ai_rows):
-                formatted_r = format_row_for_gsheets(r, columns, profiles)
-                links_for_r: Dict[str, str] = {}
-                p_name_val = str(formatted_r.get(main_col_name, "") or "")
-                comp_val = ""
-                for c in columns:
-                    if "COMPANY" in c.get("name", "").upper():
-                        comp_val = str(formatted_r.get(c["name"], "") or "")
-                        break
-                for c in columns:
-                    if c.get("put_link") and str(formatted_r.get(c["name"], "")).strip():
-                        links_for_r[c["name"]] = _build_entity_link_for_column(
-                            c["name"],
-                            formatted_r.get(c["name"], ""),
-                            p_name_val,
-                            comp_val,
-                            ai_idx,
-                        )
-                if links_for_r:
-                    formatted_r["_links"] = links_for_r
-                if _row_matches_column_filters(formatted_r, columns) and dedup.accept(formatted_r):
-                    accepted_new_rows.append(formatted_r)
+            round_new = 0
+            round_errors = 0
+            for f in done:
+                if f.exception() is not None:
+                    round_errors += 1
+                    last_error = str(f.exception())[:120]
+                    continue
+                parsed, model_used = f.result()
+                batches_run += 1
+                for raw in parsed.get("rows") or []:
                     if len(accepted_new_rows) >= requested_count:
                         break
+                    block = _accept(raw)
+                    accepted_new_rows.extend(block)
+                    round_new += len(block)
+                for src in parsed.get("sources_consulted") or []:
+                    if src and src not in sources_consulted:
+                        sources_consulted.append(src)
 
-            sources_consulted = parsed.get("sources_consulted") or sources_consulted
-            live_ai = len(accepted_new_rows) > 0
-            ai_note = parsed.get("agent_summary", "")
-        except Exception as ai_exc:
-            ai_note = f"Used Agentic Sheet-Format Synthesis Engine (API note: {str(ai_exc)[:90]})."
+            if pending:
+                stop_reason = "time_budget"
+                break
 
-    # Top up remaining rows (up to requested_count, limit 1000) with guaranteed non-repeating Google-Sheet-formatted records
-    remaining_needed = requested_count - len(accepted_new_rows)
-    if remaining_needed > 0:
-        synthesized = generate_non_repeating_sheet_rows(
-            project=project,
-            target_tab=effective_tab,
-            columns=columns,
-            profiles=profiles,
-            dedup=dedup,
-            needed_count=remaining_needed,
-            query_prompt=query_prompt,
-        )
-        accepted_new_rows.extend(synthesized)
+            error_rounds = error_rounds + 1 if done and round_errors == len(done) else 0
+            if error_rounds >= FETCH_MAX_ERROR_ROUNDS:
+                stop_reason = "api_error"
+                break
+
+            requested_this_round = sum(size for size, _ in batch_plan)
+            if phase == "direct":
+                # A round is "dry" when under 20% of what was asked for turned out to be new.
+                dry_rounds = dry_rounds + 1 if round_new * 5 < requested_this_round else 0
+                if dry_rounds >= FETCH_MAX_DRY_ROUNDS:
+                    phase = "expand"
+
+    if not sources_consulted:
+        sources_consulted = list(mcp_names) if mcp_names else ["Web Search"]
 
     # Sort final new rows according to Data Template sort rules
     final_new_rows = apply_template_transforms(accepted_new_rows, columns)[:requested_count]
@@ -2497,12 +1941,14 @@ Task:
     headers_list = [c.get("name", "") for c in columns if c.get("name")]
 
     summary_msg = (
-        f"Produced {len(final_new_rows)} brand-new, non-repeating rows (0 duplicates against "
-        f"{len(all_existing_rows)} existing sheet rows), formatted to match '{effective_tab.get('name', 'Google Sheet')}' "
-        f"across {len(headers_list)} columns ({', '.join(headers_list[:5])}{'...' if len(headers_list) > 5 else ''})."
+        f"Found {len(final_new_rows)} of {requested_count} requested rows, each backed by a source URL "
+        f"(0 duplicates against {len(all_existing_rows)} existing sheet rows; {batches_run} search batches). "
+        f"{_STOP_REASON_TEXT[stop_reason]}"
     )
-    if ai_note and live_ai:
-        summary_msg = f"{ai_note} ({summary_msg})"
+    if len(final_new_rows) < requested_count and stop_reason != "no_api_key":
+        summary_msg += " No rows were invented to fill the gap."
+    if stop_reason == "api_error" and last_error:
+        summary_msg += f" Last error: {last_error}"
 
     return {
         "rows": final_new_rows,
@@ -2514,7 +1960,9 @@ Task:
         "agent_summary": summary_msg,
         "sources_consulted": sources_consulted,
         "model_used": model_used,
-        "live_ai": live_ai,
+        "live_ai": len(final_new_rows) > 0,
+        "stop_reason": stop_reason,
+        "batches_run": batches_run,
     }
 
 
@@ -3053,6 +2501,8 @@ async def fetch_data_with_agent(
         "deduplicated_against_count": result.get("deduplicated_against_count", 0),
         "target_tab_name": target_tab.get("name", "Tab 1"),
         "live_ai": result["live_ai"],
+        "stop_reason": result.get("stop_reason", ""),
+        "batches_run": result.get("batches_run", 0),
     }
 
     updates = {
