@@ -8,9 +8,10 @@ if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
 import httpx
-from firebase_functions import https_fn
+from firebase_functions import https_fn, tasks_fn
+from firebase_functions.options import RateLimits, RetryConfig
 from werkzeug.wrappers import Response
-from app import app
+from app import app, run_fetch_job_chunk
 
 # In-process ASGI transport connecting directly to the FastAPI app
 _transport = httpx.ASGITransport(app=app)
@@ -89,3 +90,17 @@ def api(req: https_fn.Request) -> https_fn.Response:
                 "Access-Control-Allow-Headers": "*",
             },
         )
+
+
+@tasks_fn.on_task_dispatched(
+    # A busy or crashed chunk raises, so Cloud Tasks retries it after the lease expires.
+    retry_config=RetryConfig(max_attempts=5, min_backoff_seconds=120),
+    rate_limits=RateLimits(max_concurrent_dispatches=20),
+    memory=1024,
+    timeout_sec=1800,
+)
+def fetchjob(req: tasks_fn.CallableRequest) -> None:
+    """Runs one chunk of a background fetch job (see run_fetch_job_chunk in app.py)."""
+    job_id = (req.data or {}).get("job_id")
+    if job_id:
+        asyncio.run(run_fetch_job_chunk(job_id))

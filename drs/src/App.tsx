@@ -17,11 +17,13 @@ import {
 import { auth } from './firebase'
 import {
   addRowToTab,
+  cancelFetch,
   clearNewData,
   createProject,
   deleteProject,
   fetchProjects,
   getFetchProgress,
+  getProject,
   importGoogleSheet,
   runFetchDataAgent,
   syncGoogleSheet,
@@ -30,7 +32,6 @@ import {
   uploadCsvFile,
   type ColumnTemplate,
   type DataType,
-  type FetchProgress,
   type FilterOp,
   type MCPConnector,
   type Project,
@@ -42,6 +43,14 @@ import {
 import './App.css'
 
 const PAGE_SIZE = 100
+
+function formatElapsed(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds))
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  if (minutes < 60) return `${minutes}m ${total % 60}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
 
 function formatLastEdited(isoString?: string): string {
   if (!isoString) return ''
@@ -534,8 +543,8 @@ export function App() {
     'idle' | 'saving' | 'saved' | 'syncing-gsheet' | 'synced-gsheet' | 'error'
   >('idle')
   const [statusError, setStatusError] = useState('')
-  const [fetchingData, setFetchingData] = useState(false)
-  const [fetchProgress, setFetchProgress] = useState<FetchProgress | null>(null)
+  const [startingFetch, setStartingFetch] = useState(false)
+  const [stoppingFetch, setStoppingFetch] = useState(false)
   const [agentPrompt, setAgentPrompt] = useState('')
   const [agentMode, setAgentMode] = useState<
     'gemini-3.8-flash' | 'antigravity-agent' | 'gemini-4-argon'
@@ -571,6 +580,53 @@ export function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const activeProjectRef = useRef<Project | null>(null)
+  const backgroundFetch =
+    activeProject?.fetch_progress?.status === 'running' ? activeProject.fetch_progress : null
+  const fetchingData = startingFetch || backgroundFetch !== null
+  const activeProjectId = activeProject?.id
+  const runningFetchId = backgroundFetch?.run_id
+
+  // Poll a running background fetch: stream new rows into the table, then load the final,
+  // sorted result. Also resumes after a reload, since the run lives on the server.
+  useEffect(() => {
+    if (!activeProjectId || !runningFetchId) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const since = activeProjectRef.current?.new_rows?.length ?? 0
+        const res = await getFetchProgress(activeProjectId, since)
+        if (stopped) return
+        if (res.progress?.run_id !== runningFetchId || res.progress.status !== 'running') {
+          const finalProject = await getProject(activeProjectId)
+          if (!stopped) {
+            setActiveProject(finalProject)
+            setProjects((prev) => prev.map((p) => (p.id === finalProject.id ? finalProject : p)))
+            setStoppingFetch(false)
+          }
+          return
+        }
+        const progress = res.progress
+        setActiveProject((prev) =>
+          prev && prev.id === activeProjectId
+            ? {
+                ...prev,
+                fetch_progress: progress,
+                new_rows: res.rows.length ? [...(prev.new_rows || []), ...res.rows] : prev.new_rows,
+              }
+            : prev
+        )
+      } catch {
+        // Transient polling errors are fine; the next poll catches up.
+      }
+      if (!stopped) timer = setTimeout(poll, 2500)
+    }
+    void poll()
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+    }
+  }, [activeProjectId, runningFetchId])
   useEffect(() => {
     activeProjectRef.current = activeProject
   }, [activeProject])
@@ -1085,7 +1141,8 @@ export function App() {
     persistProjectUpdates(nextProj, { mcps: nextMcps })
   }
 
-  // Run Agentic AI "Fetch Data" (Produces ONLY new non-repeating data, up to 1000 lines)
+  // Run Agentic AI "Fetch Data" (Produces ONLY new non-repeating data, up to 1000 lines).
+  // The backend runs it as a background job; the polling effect below streams its progress.
   async function handleFetchData() {
     if (!activeProject) return
     const parsedLines = parseInt(requestedLinesInput, 10)
@@ -1093,46 +1150,10 @@ export function App() {
       ? 10
       : Math.max(1, Math.min(1000, parsedLines))
     setRequestedLinesInput(String(clampedLines))
-    const projectId = activeProject.id
-    const runId = crypto.randomUUID().slice(0, 12)
-    // A new request replaces the previous new data; rows from this run stream in below.
-    setActiveProject((prev) =>
-      prev && prev.id === projectId ? { ...prev, new_rows: [], last_agent_run: null } : prev
-    )
-    setFetchProgress(null)
-    setNewDataPage(1)
-    setNewDataSearch('')
-    setFetchingData(true)
+    setStartingFetch(true)
+    setStoppingFetch(false)
     setStatusError('')
     setCopyToast('')
-
-    let polling = true
-    let rowsSeen = 0
-    const pollProgress = async () => {
-      while (polling) {
-        try {
-          const res = await getFetchProgress(projectId, rowsSeen)
-          // Ignore state left over from a previous run until the backend has started this one.
-          if (polling && res.progress?.run_id === runId) {
-            const freshRows = res.rows
-            rowsSeen = res.total_rows
-            setFetchProgress(res.progress)
-            if (freshRows.length > 0) {
-              setActiveProject((prev) =>
-                prev && prev.id === projectId
-                  ? { ...prev, new_rows: [...(prev.new_rows || []), ...freshRows] }
-                  : prev
-              )
-            }
-          }
-        } catch {
-          // Transient polling errors are fine; the final response carries the full result.
-        }
-        await new Promise((resolve) => setTimeout(resolve, 2000))
-      }
-    }
-    void pollProgress()
-
     try {
       await updateProject(activeProject.id, {
         name: activeProject.name,
@@ -1149,19 +1170,29 @@ export function App() {
         append_rows: false,
         agent_mode: agentMode,
         gemini_api_key: geminiApiKey || undefined,
-        run_id: runId,
+        run_id: crypto.randomUUID().slice(0, 12),
       })
-      polling = false
+      // `updated` has the previous new data cleared and a running fetch_progress.
       setActiveProject(updated)
       setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
       setNewDataPage(1)
-      setSavingStatus('saved')
+      setNewDataSearch('')
     } catch (err: unknown) {
       setStatusError(err instanceof Error ? err.message : 'Failed to fetch data with AI Agent')
     } finally {
-      polling = false
-      setFetchingData(false)
-      setFetchProgress(null)
+      setStartingFetch(false)
+    }
+  }
+
+  async function handleStopFetch() {
+    if (!activeProject) return
+    setStoppingFetch(true)
+    try {
+      const updated = await cancelFetch(activeProject.id)
+      setActiveProject(updated)
+    } catch (err: unknown) {
+      setStoppingFetch(false)
+      setStatusError(err instanceof Error ? err.message : 'Failed to stop the fetch')
     }
   }
 
@@ -2706,15 +2737,33 @@ export function App() {
 
           {fetchingData && (
             <div className="dm-agent-banner dm-fetch-progress">
-              <strong>
-                Searching… {fetchProgress?.found ?? 0} of{' '}
-                {fetchProgress?.requested ?? requestedLinesInput} rows found
-              </strong>
-              {fetchProgress && fetchProgress.log.length > 0 ? (
+              <div className="dm-fetch-progress-head">
+                <strong>
+                  {stoppingFetch ? 'Stopping…' : 'Searching…'} {backgroundFetch?.found ?? 0} of{' '}
+                  {backgroundFetch?.requested ?? requestedLinesInput} rows found
+                </strong>
+                {backgroundFetch && (
+                  <button
+                    type="button"
+                    className="dm-stop-fetch-btn"
+                    disabled={stoppingFetch}
+                    onClick={handleStopFetch}
+                  >
+                    Stop
+                  </button>
+                )}
+              </div>
+              <div className="dm-fetch-note">
+                This runs in the background, so you can close this page.
+                {backgroundFetch?.notify_email
+                  ? ` We'll email ${backgroundFetch.notify_email} when it's done.`
+                  : ''}
+              </div>
+              {backgroundFetch && backgroundFetch.log.length > 0 ? (
                 <ol className="dm-fetch-log">
-                  {[...fetchProgress.log].reverse().slice(0, 12).map((entry, i) => (
+                  {[...backgroundFetch.log].reverse().slice(0, 12).map((entry, i) => (
                     <li key={`${entry.t}-${i}`}>
-                      <span className="dm-fetch-log-time">{Math.round(entry.t)}s</span>
+                      <span className="dm-fetch-log-time">{formatElapsed(entry.t)}</span>
                       {entry.msg}
                     </li>
                   ))}
@@ -2739,6 +2788,11 @@ export function App() {
             <div className="dm-agent-banner">
               <strong>Agent Run ({activeProject.last_agent_run.model_used}):</strong>{' '}
               {activeProject.last_agent_run.agent_summary}
+              {activeProject.last_agent_run.email_status && (
+                <div style={{ marginTop: '4px', fontSize: '0.78rem', color: '#92400e' }}>
+                  Email: {activeProject.last_agent_run.email_status}
+                </div>
+              )}
               {activeProject.last_agent_run.sources_consulted?.length > 0 && (
                 <div style={{ marginTop: '4px', fontSize: '0.78rem', color: '#92400e' }}>
                   Sources: {activeProject.last_agent_run.sources_consulted.join(', ')}
