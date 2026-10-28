@@ -17,9 +17,11 @@ import {
 import { auth } from './firebase'
 import {
   addRowToTab,
+  clearNewData,
   createProject,
   deleteProject,
   fetchProjects,
+  getFetchProgress,
   importGoogleSheet,
   runFetchDataAgent,
   syncGoogleSheet,
@@ -28,6 +30,7 @@ import {
   uploadCsvFile,
   type ColumnTemplate,
   type DataType,
+  type FetchProgress,
   type FilterOp,
   type MCPConnector,
   type Project,
@@ -532,6 +535,7 @@ export function App() {
   >('idle')
   const [statusError, setStatusError] = useState('')
   const [fetchingData, setFetchingData] = useState(false)
+  const [fetchProgress, setFetchProgress] = useState<FetchProgress | null>(null)
   const [agentPrompt, setAgentPrompt] = useState('')
   const [agentMode, setAgentMode] = useState<
     'gemini-3.8-flash' | 'antigravity-agent' | 'gemini-4-argon'
@@ -1089,9 +1093,46 @@ export function App() {
       ? 10
       : Math.max(1, Math.min(1000, parsedLines))
     setRequestedLinesInput(String(clampedLines))
+    const projectId = activeProject.id
+    const runId = crypto.randomUUID().slice(0, 12)
+    // A new request replaces the previous new data; rows from this run stream in below.
+    setActiveProject((prev) =>
+      prev && prev.id === projectId ? { ...prev, new_rows: [], last_agent_run: null } : prev
+    )
+    setFetchProgress(null)
+    setNewDataPage(1)
+    setNewDataSearch('')
     setFetchingData(true)
     setStatusError('')
     setCopyToast('')
+
+    let polling = true
+    let rowsSeen = 0
+    const pollProgress = async () => {
+      while (polling) {
+        try {
+          const res = await getFetchProgress(projectId, rowsSeen)
+          // Ignore state left over from a previous run until the backend has started this one.
+          if (polling && res.progress?.run_id === runId) {
+            const freshRows = res.rows
+            rowsSeen = res.total_rows
+            setFetchProgress(res.progress)
+            if (freshRows.length > 0) {
+              setActiveProject((prev) =>
+                prev && prev.id === projectId
+                  ? { ...prev, new_rows: [...(prev.new_rows || []), ...freshRows] }
+                  : prev
+              )
+            }
+          }
+        } catch {
+          // Transient polling errors are fine; the final response carries the full result.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+      }
+    }
+    void pollProgress()
+
     try {
       await updateProject(activeProject.id, {
         name: activeProject.name,
@@ -1108,16 +1149,34 @@ export function App() {
         append_rows: false,
         agent_mode: agentMode,
         gemini_api_key: geminiApiKey || undefined,
+        run_id: runId,
       })
+      polling = false
       setActiveProject(updated)
       setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
       setNewDataPage(1)
-      setNewDataSearch('')
       setSavingStatus('saved')
     } catch (err: unknown) {
       setStatusError(err instanceof Error ? err.message : 'Failed to fetch data with AI Agent')
     } finally {
+      polling = false
       setFetchingData(false)
+      setFetchProgress(null)
+    }
+  }
+
+  async function handleClearNewData() {
+    if (!activeProject) return
+    if (!window.confirm('Clear all new data produced by the last fetch? This cannot be undone.')) return
+    setStatusError('')
+    try {
+      const updated = await clearNewData(activeProject.id)
+      setActiveProject(updated)
+      setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
+      setNewDataPage(1)
+      setNewDataSearch('')
+    } catch (err: unknown) {
+      setStatusError(err instanceof Error ? err.message : 'Failed to clear new data')
     }
   }
 
@@ -2645,7 +2704,38 @@ export function App() {
                 })`}
           </button>
 
-          {activeProject.last_agent_run && (
+          {fetchingData && (
+            <div className="dm-agent-banner dm-fetch-progress">
+              <strong>
+                Searching… {fetchProgress?.found ?? 0} of{' '}
+                {fetchProgress?.requested ?? requestedLinesInput} rows found
+              </strong>
+              {fetchProgress && fetchProgress.log.length > 0 ? (
+                <ol className="dm-fetch-log">
+                  {[...fetchProgress.log].reverse().slice(0, 12).map((entry, i) => (
+                    <li key={`${entry.t}-${i}`}>
+                      <span className="dm-fetch-log-time">{Math.round(entry.t)}s</span>
+                      {entry.msg}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <div className="dm-fetch-log-empty">Starting search…</div>
+              )}
+            </div>
+          )}
+
+          {!fetchingData && (newRows.length > 0 || activeProject.last_agent_run) && (
+            <button
+              type="button"
+              className="dm-clear-new-data-btn"
+              onClick={handleClearNewData}
+            >
+              Clear New Data
+            </button>
+          )}
+
+          {!fetchingData && activeProject.last_agent_run && (
             <div className="dm-agent-banner">
               <strong>Agent Run ({activeProject.last_agent_run.model_used}):</strong>{' '}
               {activeProject.last_agent_run.agent_summary}

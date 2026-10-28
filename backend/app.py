@@ -6,10 +6,12 @@ import io
 import json
 import os
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 import firebase_admin
 import gspread
@@ -140,6 +142,8 @@ class FetchDataRequest(BaseModel):
     append_rows: bool = True
     agent_mode: Literal["gemini-3.8-flash", "antigravity-agent", "gemini-4-argon"] = "gemini-3.8-flash"
     gemini_api_key: Optional[str] = None
+    # Client-generated id so progress polling can ignore state left over from a previous run.
+    run_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1406,14 +1410,15 @@ def _row_matches_column_filters(row: Dict[str, Any], columns: List[Dict[str, Any
 # ---------------------------------------------------------------------------
 
 # Fetches run as many small model calls (FETCH_BATCH_SIZE rows each) instead of one huge response,
-# so a 1000-row request never depends on the model emitting hundreds of rows at once.
-FETCH_BATCH_SIZE = max(1, int(os.getenv("FETCH_BATCH_SIZE", "10")))
-FETCH_CONCURRENCY = max(1, int(os.getenv("FETCH_CONCURRENCY", "4")))
+# so a 1000-row request never depends on the model emitting hundreds of rows at once. Small batches
+# also return faster, so rows start appearing sooner.
+FETCH_BATCH_SIZE = max(1, int(os.getenv("FETCH_BATCH_SIZE", "5")))
+FETCH_CONCURRENCY = max(1, int(os.getenv("FETCH_CONCURRENCY", "6")))
 # Must stay below the Cloud Function timeout in main.py so partial results are still returned and saved.
 FETCH_TIME_BUDGET_SEC = float(os.getenv("FETCH_TIME_BUDGET_SEC", "480"))
-# Consecutive low-yield rounds before the direct query is considered exhausted.
-FETCH_MAX_DRY_ROUNDS = 2
-FETCH_MAX_ERROR_ROUNDS = 2
+# Consecutive low-yield batches before the direct query is considered exhausted.
+FETCH_MAX_DRY_BATCHES = 3
+FETCH_MAX_ERROR_BATCHES = 4
 FETCH_EXCLUDE_LIST_LIMIT = 250
 FETCH_SEEDS_PER_ANGLE = 5
 
@@ -1429,7 +1434,7 @@ _DIRECT_SEARCH_ANGLES = [
 _STOP_REASON_TEXT = {
     "target_reached": "Requested row count reached.",
     "exhausted": "Search exhausted: the direct query and the Main-column expansion searches stopped finding new verifiable records.",
-    "time_budget": "Stopped at the time limit for one run; run Fetch again to continue (already-found rows are skipped).",
+    "time_budget": "Stopped at the time limit for one run. Copy these rows first: the next Fetch replaces them with further new rows (rows already found are skipped).",
     "api_error": "Stopped because the AI provider kept returning errors.",
     "no_api_key": "No Gemini API key configured, so no data could be fetched.",
 }
@@ -1607,7 +1612,12 @@ async def run_agentic_scraper(
     row_count: int,
     agent_mode: str,
     override_api_key: Optional[str] = None,
+    on_progress: Optional[Callable[[str, List[Dict[str, Any]]], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
+    """
+    Fetches up to `row_count` real, source-backed rows. `on_progress(message, rows_so_far)` is awaited
+    after each step so callers can surface live progress.
+    """
     load_dotenv(BASE_DIR / ".env", override=True)
     load_dotenv(BASE_DIR / ".env.example", override=False)
 
@@ -1789,15 +1799,20 @@ Data Template Columns & Learned Google Sheet Formatting Rules:
     batches_run = 0
     last_error = ""
 
-    def _accept(raw: Any) -> List[Dict[str, Any]]:
+    async def _report(message: str) -> None:
+        if on_progress is not None:
+            await on_progress(message, accepted_new_rows)
+
+    def _accept(raw: Any) -> Tuple[List[Dict[str, Any]], str]:
+        """Returns the accepted row block, or an empty list and the reason it was skipped."""
         if not isinstance(raw, dict):
-            return []
+            return [], "malformed"
         source_url = str(raw.get("_source_url") or "").strip()
         if not source_url.startswith("http"):
-            return []
+            return [], "no source"
         formatted_r = format_row_for_gsheets(raw, columns, profiles)
         if not str(formatted_r.get(main_col_name, "") or "").strip():
-            return []
+            return [], f"no {main_col_name}"
         raw_links = raw.get("_links") if isinstance(raw.get("_links"), dict) else {}
         links_for_r = {
             c["name"]: str(raw_links.get(c["name"], "")).strip()
@@ -1809,14 +1824,18 @@ Data Template Columns & Learned Google Sheet Formatting Rules:
         if links_for_r:
             formatted_r["_links"] = links_for_r
         formatted_r["_source"] = source_url
-        if not _row_matches_column_filters(formatted_r, columns) or not dedup.accept(formatted_r):
-            return []
+        if not _row_matches_column_filters(formatted_r, columns):
+            return [], "failed filter"
+        if not dedup.accept(formatted_r):
+            return [], "duplicate"
         block = _expand_more_rows(formatted_r, columns, profiles)
         for cont_r in block[1:]:
             dedup.register_existing(cont_r)
-        return block
+        return block, ""
 
-    if api_key:
+    if not api_key:
+        await _report("No Gemini API key configured; nothing was fetched.")
+    else:
         client = genai.Client(api_key=api_key)
 
         tools_config: List[Dict[str, Any]] = [
@@ -1834,101 +1853,132 @@ Data Template Columns & Learned Google Sheet Formatting Rules:
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + FETCH_TIME_BUDGET_SEC
+        # A dedicated executor so calls still running when we stop never hold up the response
+        # (asyncio.run waits on the default executor at shutdown).
+        executor = ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY)
+        in_flight: Dict["asyncio.Future[Tuple[Dict[str, Any], str]]", Tuple[int, str]] = {}
         phase = "direct"
         direct_angle_idx = 0
         expansion_angles: List[str] = []
         used_expansion_keys: set[str] = set()
-        dry_rounds = 0
-        error_rounds = 0
+        dry_batches = 0
+        error_batches = 0
 
-        while True:
-            remaining = requested_count - len(accepted_new_rows)
-            if remaining <= 0:
-                stop_reason = "target_reached"
-                break
-            if loop.time() >= deadline:
-                stop_reason = "time_budget"
-                break
-
-            # Phase 2: once the direct query runs dry, search outward from the Main columns' entities.
-            if phase == "expand" and not expansion_angles:
-                expansion_angles = _build_expansion_angles(
-                    columns, profiles, accepted_new_rows + all_existing_rows, used_expansion_keys
-                )
-                if not expansion_angles:
-                    stop_reason = "exhausted"
+        await _report(
+            f"Searching for {requested_count} rows with {agent_mode} "
+            f"({FETCH_BATCH_SIZE} rows per batch, up to {FETCH_CONCURRENCY} batches in parallel)."
+        )
+        try:
+            while True:
+                remaining = requested_count - len(accepted_new_rows)
+                if remaining <= 0:
+                    stop_reason = "target_reached"
+                    break
+                if loop.time() >= deadline:
+                    stop_reason = "time_budget"
                     break
 
-            n_calls = min(FETCH_CONCURRENCY, -(-remaining // FETCH_BATCH_SIZE))
-            batch_plan: List[Tuple[int, str]] = []
-            to_assign = remaining
-            for _ in range(n_calls):
-                if phase == "direct":
-                    angle = _DIRECT_SEARCH_ANGLES[direct_angle_idx % len(_DIRECT_SEARCH_ANGLES)]
-                    direct_angle_idx += 1
-                elif expansion_angles:
-                    angle = expansion_angles.pop(0)
-                else:
-                    break
-                size = min(FETCH_BATCH_SIZE, to_assign)
-                to_assign -= size
-                batch_plan.append((size, angle))
-
-            exclude = []
-            for v in _entity_values(accepted_new_rows[::-1] + all_existing_rows, main_col_name):
-                exclude.append(v)
-                if len(exclude) >= FETCH_EXCLUDE_LIST_LIMIT:
-                    break
-
-            futures = [
-                asyncio.ensure_future(asyncio.to_thread(
-                    _run_fetch_batch,
-                    client,
-                    agent_mode,
-                    base_prompt + _batch_task_prompt(size, angle, exclude, source_names),
-                    output_json_schema,
-                    tools_config,
-                ))
-                for size, angle in batch_plan
-            ]
-            done, pending = await asyncio.wait(futures, timeout=max(1.0, deadline - loop.time()))
-            for f in pending:
-                f.cancel()
-
-            round_new = 0
-            round_errors = 0
-            for f in done:
-                if f.exception() is not None:
-                    round_errors += 1
-                    last_error = str(f.exception())[:120]
-                    continue
-                parsed, model_used = f.result()
-                batches_run += 1
-                for raw in parsed.get("rows") or []:
-                    if len(accepted_new_rows) >= requested_count:
+                # Phase 2: once the direct query runs dry, search outward from the Main columns' entities.
+                if phase == "expand" and not expansion_angles and not in_flight:
+                    expansion_angles = _build_expansion_angles(
+                        columns, profiles, accepted_new_rows + all_existing_rows, used_expansion_keys
+                    )
+                    if not expansion_angles:
+                        stop_reason = "exhausted"
                         break
-                    block = _accept(raw)
-                    accepted_new_rows.extend(block)
-                    round_new += len(block)
-                for src in parsed.get("sources_consulted") or []:
-                    if src and src not in sources_consulted:
-                        sources_consulted.append(src)
+                    await _report(f"Expanding the search from Main-column values ({len(expansion_angles)} new search angles).")
 
-            if pending:
-                stop_reason = "time_budget"
-                break
+                # Keep the pool full: start a new batch as soon as one finishes, assuming roughly
+                # 3 in 4 returned rows survive source, filter, and duplicate checks.
+                in_flight_capacity = sum(size for size, _ in in_flight.values())
+                while len(in_flight) < FETCH_CONCURRENCY and in_flight_capacity * 0.75 < remaining:
+                    if phase == "direct":
+                        angle = _DIRECT_SEARCH_ANGLES[direct_angle_idx % len(_DIRECT_SEARCH_ANGLES)]
+                        direct_angle_idx += 1
+                    elif expansion_angles:
+                        angle = expansion_angles.pop(0)
+                    else:
+                        break
+                    exclude = _entity_values(accepted_new_rows[::-1] + all_existing_rows, main_col_name)[
+                        :FETCH_EXCLUDE_LIST_LIMIT
+                    ]
+                    fut = loop.run_in_executor(
+                        executor,
+                        _run_fetch_batch,
+                        client,
+                        agent_mode,
+                        base_prompt + _batch_task_prompt(FETCH_BATCH_SIZE, angle, exclude, source_names),
+                        output_json_schema,
+                        tools_config,
+                    )
+                    in_flight[fut] = (FETCH_BATCH_SIZE, angle)
+                    in_flight_capacity += FETCH_BATCH_SIZE
 
-            error_rounds = error_rounds + 1 if done and round_errors == len(done) else 0
-            if error_rounds >= FETCH_MAX_ERROR_ROUNDS:
-                stop_reason = "api_error"
-                break
+                if not in_flight:
+                    continue
 
-            requested_this_round = sum(size for size, _ in batch_plan)
-            if phase == "direct":
-                # A round is "dry" when under 20% of what was asked for turned out to be new.
-                dry_rounds = dry_rounds + 1 if round_new * 5 < requested_this_round else 0
-                if dry_rounds >= FETCH_MAX_DRY_ROUNDS:
-                    phase = "expand"
+                done, _ = await asyncio.wait(
+                    list(in_flight),
+                    timeout=max(0.5, deadline - loop.time()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    stop_reason = "time_budget"
+                    break
+
+                for fut in done:
+                    size, angle = in_flight.pop(fut)
+                    exc = fut.exception()
+                    if exc is not None:
+                        error_batches += 1
+                        last_error = str(exc)[:120]
+                        await _report(f"A search batch failed: {last_error}")
+                        continue
+                    error_batches = 0
+                    parsed, model_used = fut.result()
+                    batches_run += 1
+
+                    new_entities = 0
+                    skipped: Dict[str, int] = {}
+                    for raw in parsed.get("rows") or []:
+                        if len(accepted_new_rows) >= requested_count:
+                            break
+                        block, reason = _accept(raw)
+                        if block:
+                            accepted_new_rows.extend(block)
+                            new_entities += 1
+                        else:
+                            skipped[reason] = skipped.get(reason, 0) + 1
+                    for src in parsed.get("sources_consulted") or []:
+                        if src and src not in sources_consulted:
+                            sources_consulted.append(src)
+
+                    msg = f"Batch {batches_run}"
+                    if angle:
+                        msg += f" ({angle[:90]}{'…' if len(angle) > 90 else ''})"
+                    msg += f": {new_entities} new"
+                    if skipped:
+                        msg += " · skipped " + ", ".join(f"{n} {r}" for r, n in skipped.items())
+                    msg += f". Total {min(len(accepted_new_rows), requested_count)}/{requested_count}."
+                    agent_note = str(parsed.get("agent_summary") or "").strip()
+                    if agent_note:
+                        msg += f" Agent: {agent_note[:220]}"
+                    await _report(msg)
+
+                    if phase == "direct":
+                        # A batch is "dry" when under 20% of what it asked for turned out to be new.
+                        dry_batches = dry_batches + 1 if new_entities * 5 < size else 0
+                        if dry_batches >= FETCH_MAX_DRY_BATCHES:
+                            phase = "expand"
+                            await _report("The direct search is running dry; switching to Main-column expansion.")
+
+                if error_batches >= FETCH_MAX_ERROR_BATCHES:
+                    stop_reason = "api_error"
+                    break
+        finally:
+            for fut in in_flight:
+                fut.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
 
     if not sources_consulted:
         sources_consulted = list(mcp_names) if mcp_names else ["Web Search"]
@@ -2469,14 +2519,67 @@ async def fetch_data_with_agent(
     )
 
     requested_lines = max(1, min(int(payload.row_count), 1000))
-    result = await run_agentic_scraper(
-        project=project,
-        target_tab=target_tab,
-        query_prompt=payload.query_prompt or "",
-        row_count=requested_lines,
-        agent_mode=payload.agent_mode,
-        override_api_key=payload.gemini_api_key,
-    )
+
+    # A new request replaces the previous new data right away; rows found are saved as they arrive
+    # so the client can show them live and a timeout never loses what was already found.
+    progress: Dict[str, Any] = {
+        "run_id": payload.run_id or uuid.uuid4().hex[:12],
+        "status": "running",
+        "requested": requested_lines,
+        "found": 0,
+        "log": [],
+        "started_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    started = time.monotonic()
+    live_rows: List[Dict[str, Any]] = []
+    dirty = asyncio.Event()
+
+    async def _flush() -> None:
+        dirty.clear()
+        progress["updated_at"] = _now_iso()
+        await asyncio.to_thread(
+            doc_ref.update, {"fetch_progress": dict(progress), "new_rows": list(live_rows)}
+        )
+
+    async def _on_progress(message: str, rows_so_far: List[Dict[str, Any]]) -> None:
+        live_rows[:] = rows_so_far[:requested_lines]
+        progress["found"] = len(live_rows)
+        progress["log"] = (progress["log"] + [{"t": round(time.monotonic() - started, 1), "msg": message}])[-40:]
+        dirty.set()
+
+    async def _flusher() -> None:
+        while True:
+            await dirty.wait()
+            await _flush()
+            await asyncio.sleep(1.5)
+
+    await asyncio.to_thread(doc_ref.update, {
+        "new_rows": [],
+        "last_agent_run": None,
+        "fetch_progress": dict(progress),
+    })
+    flusher = asyncio.create_task(_flusher())
+    try:
+        result = await run_agentic_scraper(
+            project=project,
+            target_tab=target_tab,
+            query_prompt=payload.query_prompt or "",
+            row_count=requested_lines,
+            agent_mode=payload.agent_mode,
+            override_api_key=payload.gemini_api_key,
+            on_progress=_on_progress,
+        )
+    except Exception as exc:
+        flusher.cancel()
+        progress["status"] = "error"
+        await _on_progress(f"Fetch failed: {str(exc)[:200]}", live_rows)
+        await _flush()
+        raise
+    flusher.cancel()
+    progress["status"] = "done"
+    progress["stop_reason"] = result.get("stop_reason", "")
+    await _on_progress(result["agent_summary"], result["rows"])
 
     new_rows = result["rows"]
     new_headers = result.get("headers") or [c.get("name", "") for c in project.get("columns", []) if c.get("name")]
@@ -2514,6 +2617,7 @@ async def fetch_data_with_agent(
         "new_headers": new_headers,
         "last_edited": _now_iso(),
         "last_agent_run": agent_run_meta,
+        "fetch_progress": progress,
     }
     doc_ref.update(updates)
 
@@ -2521,6 +2625,50 @@ async def fetch_data_with_agent(
     updated["id"] = project_id
     updated["tsv_rows_only"] = result.get("tsv_rows_only", "")
     updated["tsv_with_headers"] = result.get("tsv_with_headers", "")
+    return updated
+
+
+@app.get("/api/projects/{project_id}/fetch-progress")
+async def get_fetch_progress(
+    project_id: str,
+    since: int = 0,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Live progress of the current fetch plus the new rows found after index `since`."""
+    doc = db.collection("projects").document(project_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project = doc.to_dict()
+    if project.get("owner_uid") != user["uid"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    rows = project.get("new_rows") or []
+    return {
+        "progress": project.get("fetch_progress"),
+        "total_rows": len(rows),
+        "rows": rows[max(0, since):],
+    }
+
+
+@app.delete("/api/projects/{project_id}/new-data")
+async def clear_new_data(
+    project_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    doc_ref = db.collection("projects").document(project_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if doc.to_dict().get("owner_uid") != user["uid"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    doc_ref.update({
+        "new_rows": [],
+        "new_headers": [],
+        "last_agent_run": None,
+        "fetch_progress": None,
+        "last_edited": _now_iso(),
+    })
+    updated = doc_ref.get().to_dict()
+    updated["id"] = project_id
     return updated
 
 
