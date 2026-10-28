@@ -1,4 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
@@ -404,6 +411,100 @@ function buildGoogleSheetsHtmlTable(
   return `<table><tbody>${trs.join('')}</tbody></table>`
 }
 
+interface SheetCellProps {
+  rowIndex: number
+  colName: string
+  value: string | number
+  linkUrl: string
+  span: number
+  onCommit: (rowIndex: number, colName: string, newValue: string) => void
+}
+
+/**
+ * Memoized cell component with isolated local draft state.
+ * Prevents keystrokes inside a cell (or in any other input on the page) from
+ * re-rendering all 800–1,600 table cells on every character typed.
+ */
+const MemoizedSheetCell = React.memo(function MemoizedSheetCell({
+  rowIndex,
+  colName,
+  value,
+  linkUrl,
+  span,
+  onCommit,
+}: SheetCellProps) {
+  const externalStr = String(value ?? '')
+  const [draft, setDraft] = useState<string>(externalStr)
+
+  useEffect(() => {
+    setDraft(String(value ?? ''))
+  }, [value])
+
+  const isMultiLine = draft.includes('\n') || externalStr.includes('\n')
+
+  function commitIfChanged(currentVal: string) {
+    if (currentVal !== externalStr) {
+      onCommit(rowIndex, colName, currentVal)
+    }
+  }
+
+  return (
+    <td
+      rowSpan={span > 1 ? span : undefined}
+      className={span > 1 ? 'dm-merged-cell' : undefined}
+    >
+      <div className="dm-cell-inner">
+        {isMultiLine ? (
+          <textarea
+            className="dm-sheet-cell-textarea"
+            rows={Math.min(5, Math.max(2, draft.split('\n').length))}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={(e) => commitIfChanged(e.target.value)}
+          />
+        ) : (
+          <input
+            type="text"
+            className={`dm-sheet-cell-input ${linkUrl ? 'dm-linked-cell-input' : ''}`}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={(e) => commitIfChanged(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur()
+              }
+            }}
+          />
+        )}
+        {(linkUrl || span > 1) && (
+          <div className="dm-cell-badges">
+            {linkUrl && (
+              <a
+                href={linkUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="dm-cell-link-badge"
+                title={`Open webpage: ${linkUrl}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                🔗 Link ↗
+              </a>
+            )}
+            {span > 1 && (
+              <span
+                className="dm-cell-merged-badge"
+                title={`Vertically merged across ${span} rows`}
+              >
+                ↕ {span} rows
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </td>
+  )
+})
+
 export function App() {
   // Auth state
   const [user, setUser] = useState<User | null>(null)
@@ -441,12 +542,14 @@ export function App() {
   // New Data (Google Sheets Ready) state
   const [newDataPage, setNewDataPage] = useState(1)
   const [newDataSearch, setNewDataSearch] = useState('')
+  const deferredNewDataSearch = useDeferredValue(newDataSearch)
   const [copyToast, setCopyToast] = useState('')
   const [showRawTsvPreview, setShowRawTsvPreview] = useState(false)
 
   // Tab & Table Pagination/Search state
   const [tablePage, setTablePage] = useState(1)
   const [tableSearch, setTableSearch] = useState('')
+  const deferredTableSearch = useDeferredValue(tableSearch)
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null)
   const [renamingTabValue, setRenamingTabValue] = useState('')
 
@@ -458,8 +561,15 @@ export function App() {
   const [geminiApiKey, setGeminiApiKey] = useState<string>(
     () => localStorage.getItem('DRS_GEMINI_API_KEY') || ''
   )
+  const [customApiBaseUrl, setCustomApiBaseUrl] = useState<string>(
+    () => localStorage.getItem('DRS_API_BASE_URL') || ''
+  )
 
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const activeProjectRef = useRef<Project | null>(null)
+  useEffect(() => {
+    activeProjectRef.current = activeProject
+  }, [activeProject])
 
   // Observe Firebase Auth state
   useEffect(() => {
@@ -541,7 +651,7 @@ export function App() {
     setStatusError('')
   }
 
-  // Persist project updates without overwriting active_tab_id if user switched tabs while request was in flight
+  // Persist project updates WITHOUT overwriting live local input state when the network response arrives
   async function persistProjectUpdates(
     nextProject: Project,
     fields: Partial<
@@ -563,16 +673,27 @@ export function App() {
     setSavingStatus(fields.sync_to_gsheet ? 'syncing-gsheet' : 'saving')
     try {
       const saved = await updateProject(nextProject.id, fields)
+      // Update only server metadata (`last_edited` and `gsheet_sync`) so in-flight typing is never clobbered
       setActiveProject((curr) =>
         curr && curr.id === saved.id
           ? {
-              ...saved,
-              // Preserve local active_tab_id if user clicked another tab in the meantime
-              active_tab_id: fields.active_tab_id ? saved.active_tab_id : curr.active_tab_id,
+              ...curr,
+              last_edited: saved.last_edited || curr.last_edited,
+              gsheet_sync: saved.gsheet_sync || curr.gsheet_sync,
             }
-          : saved
+          : curr
       )
-      setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p)))
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === saved.id
+            ? {
+                ...p,
+                last_edited: saved.last_edited || p.last_edited,
+                gsheet_sync: saved.gsheet_sync || p.gsheet_sync,
+              }
+            : p
+        )
+      )
       setSavingStatus(saved.gsheet_sync?.synced ? 'synced-gsheet' : 'saved')
     } catch (err: unknown) {
       setSavingStatus('error')
@@ -701,8 +822,29 @@ export function App() {
     }
   }
 
-  // Update a specific ColumnTemplate property
-  function updateSelectedColumn(patch: Partial<ColumnTemplate>) {
+  // Update a specific ColumnTemplate property in local state ONLY (for fast, zero-lag typing in text inputs)
+  function updateSelectedColumnLocal(patch: Partial<ColumnTemplate>) {
+    if (!activeProject) return
+    const nextCols = activeProject.columns.map((c) => {
+      if (c.id === selectedColumnId) {
+        return { ...c, ...patch }
+      }
+      if (patch.retrieve_all_mode) {
+        return { ...c, retrieve_all_mode: patch.retrieve_all_mode }
+      }
+      return c
+    })
+    setActiveProject({ ...activeProject, columns: nextCols })
+  }
+
+  // Persist current columns to backend on blur of Column Name / Special Instructions / Filter Value
+  function commitColumnsToBackend() {
+    if (!activeProject) return
+    persistProjectUpdates(activeProject, { columns: activeProject.columns })
+  }
+
+  // Update a specific ColumnTemplate property AND persist immediately (for discrete button/checkbox/select clicks)
+  function updateSelectedColumnImmediate(patch: Partial<ColumnTemplate>) {
     if (!activeProject) return
     const nextCols = activeProject.columns.map((c) => {
       if (c.id === selectedColumnId) {
@@ -820,38 +962,40 @@ export function App() {
     persistProjectUpdates(nextProj, { tabs: nextTabs, active_tab_id: nextActiveId })
   }
 
-  // Edit a cell in the Sheet-style table
-  function handleCellChange(actualRowIndex: number, colName: string, value: string) {
-    if (!activeProject) return
-    const nextTabs = activeProject.tabs.map((tab) => {
-      if (tab.id !== activeProject.active_tab_id) return tab
-      const nextRows = [...tab.rows]
-      nextRows[actualRowIndex] = { ...nextRows[actualRowIndex], [colName]: value }
-      return { ...tab, rows: nextRows }
-    })
-    setActiveProject({ ...activeProject, tabs: nextTabs })
-  }
+  // Commit a cell edit in the Existing Data Sheet table (called on blur / Enter from MemoizedSheetCell)
+  const handleCommitExistingCell = useCallback(
+    async (actualRowIndex: number, colName: string, value: string) => {
+      const proj = activeProjectRef.current
+      if (!proj) return
+      const nextTabs = proj.tabs.map((tab) => {
+        if (tab.id !== proj.active_tab_id) return tab
+        const nextRows = [...tab.rows]
+        nextRows[actualRowIndex] = { ...nextRows[actualRowIndex], [colName]: value }
+        return { ...tab, rows: nextRows }
+      })
+      const nextProj = { ...proj, tabs: nextTabs }
+      setActiveProject(nextProj)
 
-  async function handleCellBlur(actualRowIndex: number, colName: string, value: string | number) {
-    if (!activeProject) return
-    const isGsheet = activeProject.existing_data_type === 'gsheets'
-    setSavingStatus(isGsheet ? 'syncing-gsheet' : 'saving')
-    try {
-      const res = await updateSheetCell(
-        activeProject.id,
-        activeProject.active_tab_id,
-        actualRowIndex,
-        colName,
-        value,
-        isGsheet
-      )
-      setProjects((prev) => prev.map((p) => (p.id === activeProject.id ? activeProject : p)))
-      setSavingStatus(res.gsheet_sync?.synced ? 'synced-gsheet' : 'saved')
-    } catch (err: unknown) {
-      setSavingStatus('error')
-      setStatusError(err instanceof Error ? err.message : 'Failed to save cell')
-    }
-  }
+      const isGsheet = proj.existing_data_type === 'gsheets'
+      setSavingStatus(isGsheet ? 'syncing-gsheet' : 'saving')
+      try {
+        const res = await updateSheetCell(
+          proj.id,
+          proj.active_tab_id,
+          actualRowIndex,
+          colName,
+          value,
+          isGsheet
+        )
+        setProjects((prev) => prev.map((p) => (p.id === nextProj.id ? nextProj : p)))
+        setSavingStatus(res.gsheet_sync?.synced ? 'synced-gsheet' : 'saved')
+      } catch (err: unknown) {
+        setSavingStatus('error')
+        setStatusError(err instanceof Error ? err.message : 'Failed to save cell')
+      }
+    },
+    []
+  )
 
   async function handleAddEmptySheetRow() {
     if (!activeProject) return
@@ -1051,18 +1195,18 @@ export function App() {
     }
   }
 
-  // Edit a cell inside the Newly Produced Data table
-  function handleNewDataCellChange(rowIndex: number, colName: string, value: string) {
-    if (!activeProject || !activeProject.new_rows) return
-    const nextNewRows = [...activeProject.new_rows]
-    nextNewRows[rowIndex] = { ...nextNewRows[rowIndex], [colName]: value }
-    setActiveProject({ ...activeProject, new_rows: nextNewRows })
-  }
-
-  function handleNewDataCellBlur() {
-    if (!activeProject || !activeProject.new_rows) return
-    persistProjectUpdates(activeProject, { new_rows: activeProject.new_rows })
-  }
+  // Commit a cell edit inside the Newly Produced Data table (called on blur / Enter from MemoizedSheetCell)
+  const handleCommitNewDataCell = useCallback(
+    (rowIndex: number, colName: string, value: string) => {
+      const proj = activeProjectRef.current
+      if (!proj || !proj.new_rows) return
+      const nextNewRows = [...proj.new_rows]
+      nextNewRows[rowIndex] = { ...nextNewRows[rowIndex], [colName]: value }
+      const nextProj = { ...proj, new_rows: nextNewRows }
+      persistProjectUpdates(nextProj, { new_rows: nextNewRows })
+    },
+    []
+  )
 
   function handleExportNewDataCsv(
     rowsToExport: SheetRow[],
@@ -1089,28 +1233,36 @@ export function App() {
     URL.revokeObjectURL(url)
   }
 
-  // Save Gemini API Key in localStorage
+  // Save Gemini API Key & Optional Custom Backend API URL in localStorage
   function handleSaveApiKey(e: React.FormEvent) {
     e.preventDefault()
     localStorage.setItem('DRS_GEMINI_API_KEY', geminiApiKey.trim())
+    const trimmedUrl = customApiBaseUrl.trim().replace(/\/+$/, '')
+    if (trimmedUrl) {
+      localStorage.setItem('DRS_API_BASE_URL', trimmedUrl)
+    } else {
+      localStorage.removeItem('DRS_API_BASE_URL')
+    }
+    setCustomApiBaseUrl(trimmedUrl)
     setShowAiKeyModal(false)
   }
 
-  // Compute active tab, headers, filtered rows, and current page rows
+  // Compute active tab, headers, filtered rows, and current page rows with narrowed dependencies
+  const projectTabs = activeProject?.tabs
+  const activeTabId = activeProject?.active_tab_id
+  const projectColumns = activeProject?.columns
+
   const activeTab = useMemo(() => {
-    if (!activeProject || !activeProject.tabs?.length) return null
-    return (
-      activeProject.tabs.find((t) => t.id === activeProject.active_tab_id) ||
-      activeProject.tabs[0]
-    )
-  }, [activeProject])
+    if (!projectTabs?.length) return null
+    return projectTabs.find((t) => t.id === activeTabId) || projectTabs[0]
+  }, [projectTabs, activeTabId])
 
   const displayHeaders = useMemo(() => {
-    if (!activeProject) return []
+    if (!projectColumns) return []
     if (activeTab?.headers && activeTab.headers.length > 0) {
       return activeTab.headers
     }
-    const templateNames = activeProject.columns.map((c) => c.name).filter(Boolean)
+    const templateNames = projectColumns.map((c) => c.name).filter(Boolean)
     if (activeTab?.rows && activeTab.rows.length > 0) {
       const sampleKeys = Object.keys(activeTab.rows[0]).filter((k) => !k.startsWith('_'))
       // Check if template names match sampleKeys (case-insensitively)
@@ -1122,18 +1274,19 @@ export function App() {
       }
     }
     return templateNames
-  }, [activeProject, activeTab])
+  }, [projectColumns, activeTab])
 
+  const activeTabRows = activeTab?.rows
   const indexedFilteredRows = useMemo(() => {
-    const rawRows = activeTab?.rows || []
-    return filterRowsPreservingMergedGroups(rawRows, displayHeaders, tableSearch)
-  }, [activeTab, displayHeaders, tableSearch])
+    const rawRows = activeTabRows || []
+    return filterRowsPreservingMergedGroups(rawRows, displayHeaders, deferredTableSearch)
+  }, [activeTabRows, displayHeaders, deferredTableSearch])
 
   const existingTabMergedStats = useMemo(() => {
-    const rawRows = activeTab?.rows || []
+    const rawRows = activeTabRows || []
     const allIndexed = rawRows.map((row, idx) => ({ row, originalIndex: idx }))
     return computeMergedCellLayout(allIndexed, displayHeaders)
-  }, [activeTab, displayHeaders])
+  }, [activeTabRows, displayHeaders])
 
   const totalPages = Math.max(1, Math.ceil(indexedFilteredRows.length / PAGE_SIZE))
   const safePage = Math.min(tablePage, totalPages)
@@ -1148,11 +1301,13 @@ export function App() {
   )
 
   // Newly Produced Data (Only New Data, never repeating Existing Data, formatted for Google Sheets)
-  const newRows = useMemo(() => activeProject?.new_rows || [], [activeProject])
+  const rawNewRows = activeProject?.new_rows
+  const rawNewHeaders = activeProject?.new_headers
+  const newRows = useMemo(() => rawNewRows || [], [rawNewRows])
   const newDataHeaders = useMemo(() => {
-    if (!activeProject) return []
-    if (activeProject.new_headers && activeProject.new_headers.length > 0) {
-      return activeProject.new_headers
+    if (!projectColumns) return []
+    if (rawNewHeaders && rawNewHeaders.length > 0) {
+      return rawNewHeaders
     }
     if (
       activeTab &&
@@ -1162,12 +1317,12 @@ export function App() {
     ) {
       return activeTab.headers
     }
-    return activeProject.columns.map((c) => c.name).filter(Boolean)
-  }, [activeProject, activeTab])
+    return projectColumns.map((c) => c.name).filter(Boolean)
+  }, [projectColumns, rawNewHeaders, activeTab])
 
   const indexedFilteredNewRows = useMemo(() => {
-    return filterRowsPreservingMergedGroups(newRows, newDataHeaders, newDataSearch)
-  }, [newRows, newDataHeaders, newDataSearch])
+    return filterRowsPreservingMergedGroups(newRows, newDataHeaders, deferredNewDataSearch)
+  }, [newRows, newDataHeaders, deferredNewDataSearch])
 
   const newRowsMergedStats = useMemo(() => {
     const allIndexed = newRows.map((row, idx) => ({ row, originalIndex: idx }))
@@ -1472,6 +1627,17 @@ export function App() {
                     placeholder="Configured in backend/.env"
                     value={geminiApiKey}
                     onChange={(e) => setGeminiApiKey(e.target.value)}
+                  />
+                </div>
+                <div className="dm-auth-field">
+                  <label>Backend API Base URL (optional override for Vercel / remote backend)</label>
+                  <input
+                    type="text"
+                    placeholder={
+                      import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+                    }
+                    value={customApiBaseUrl}
+                    onChange={(e) => setCustomApiBaseUrl(e.target.value)}
                   />
                 </div>
                 <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
@@ -1897,78 +2063,18 @@ export function App() {
                               c.name.trim().toUpperCase() === headerName.trim().toUpperCase()
                           )
                           const cellVal = getCellValue(row, headerName)
-                          const cellStr = String(cellVal ?? '')
                           const linkUrl = getCellLink(row, headerName, matchingCol)
-                          const isMultiLine = cellStr.includes('\n')
 
                           return (
-                            <td
+                            <MemoizedSheetCell
                               key={headerName}
-                              rowSpan={span > 1 ? span : undefined}
-                              className={span > 1 ? 'dm-merged-cell' : undefined}
-                            >
-                              <div className="dm-cell-inner">
-                                {isMultiLine ? (
-                                  <textarea
-                                    className="dm-sheet-cell-textarea"
-                                    rows={Math.min(5, cellStr.split('\n').length)}
-                                    value={cellStr}
-                                    onChange={(e) =>
-                                      handleCellChange(
-                                        originalIndex,
-                                        headerName,
-                                        e.target.value
-                                      )
-                                    }
-                                    onBlur={(e) =>
-                                      handleCellBlur(originalIndex, headerName, e.target.value)
-                                    }
-                                  />
-                                ) : (
-                                  <input
-                                    type="text"
-                                    className={`dm-sheet-cell-input ${
-                                      linkUrl ? 'dm-linked-cell-input' : ''
-                                    }`}
-                                    value={cellVal}
-                                    onChange={(e) =>
-                                      handleCellChange(
-                                        originalIndex,
-                                        headerName,
-                                        e.target.value
-                                      )
-                                    }
-                                    onBlur={(e) =>
-                                      handleCellBlur(originalIndex, headerName, e.target.value)
-                                    }
-                                  />
-                                )}
-                                {(linkUrl || span > 1) && (
-                                  <div className="dm-cell-badges">
-                                    {linkUrl && (
-                                      <a
-                                        href={linkUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="dm-cell-link-badge"
-                                        title={`Open webpage: ${linkUrl}`}
-                                        onClick={(e) => e.stopPropagation()}
-                                      >
-                                        🔗 Link ↗
-                                      </a>
-                                    )}
-                                    {span > 1 && (
-                                      <span
-                                        className="dm-cell-merged-badge"
-                                        title={`Vertically merged across ${span} rows`}
-                                      >
-                                        ↕ {span} rows
-                                      </span>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            </td>
+                              rowIndex={originalIndex}
+                              colName={headerName}
+                              value={cellVal}
+                              linkUrl={linkUrl}
+                              span={span}
+                              onCommit={handleCommitExistingCell}
+                            />
                           )
                         })}
                       </tr>
@@ -2147,7 +2253,13 @@ export function App() {
                       type="text"
                       className="dm-column-rename-input"
                       value={selectedCol.name}
-                      onChange={(e) => updateSelectedColumn({ name: e.target.value })}
+                      onChange={(e) => updateSelectedColumnLocal({ name: e.target.value })}
+                      onBlur={commitColumnsToBackend}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.currentTarget.blur()
+                        }
+                      }}
                     />
                   </div>
                   {activeProject.columns.length > 1 && (
@@ -2168,8 +2280,9 @@ export function App() {
                     placeholder="Instructions for the AI agent when scraping this column (automatically populated from RULES! tab if present)..."
                     value={selectedCol.special_instructions}
                     onChange={(e) =>
-                      updateSelectedColumn({ special_instructions: e.target.value })
+                      updateSelectedColumnLocal({ special_instructions: e.target.value })
                     }
+                    onBlur={commitColumnsToBackend}
                   />
                 </div>
 
@@ -2187,7 +2300,7 @@ export function App() {
                               selectedCol.sort === dir ? 'active' : ''
                             }`}
                             onClick={() =>
-                              updateSelectedColumn({
+                              updateSelectedColumnImmediate({
                                 sort: selectedCol.sort === dir ? null : dir,
                               })
                             }
@@ -2208,7 +2321,7 @@ export function App() {
                             className={`dm-seg-btn ${
                               selectedCol.query_type === qt ? 'active' : ''
                             }`}
-                            onClick={() => updateSelectedColumn({ query_type: qt })}
+                            onClick={() => updateSelectedColumnImmediate({ query_type: qt })}
                           >
                             {qt}
                           </button>
@@ -2229,7 +2342,7 @@ export function App() {
                             className={`dm-seg-btn ${
                               selectedCol.data_type === dt ? 'active' : ''
                             }`}
-                            onClick={() => updateSelectedColumn({ data_type: dt })}
+                            onClick={() => updateSelectedColumnImmediate({ data_type: dt })}
                           >
                             {dt}
                           </button>
@@ -2246,7 +2359,9 @@ export function App() {
                         className="dm-filter-select"
                         value={selectedCol.filter_op}
                         onChange={(e) =>
-                          updateSelectedColumn({ filter_op: e.target.value as FilterOp })
+                          updateSelectedColumnImmediate({
+                            filter_op: e.target.value as FilterOp,
+                          })
                         }
                       >
                         <option value="Less Than">Less Than</option>
@@ -2262,8 +2377,14 @@ export function App() {
                         placeholder="Value..."
                         value={selectedCol.filter_value}
                         onChange={(e) =>
-                          updateSelectedColumn({ filter_value: e.target.value })
+                          updateSelectedColumnLocal({ filter_value: e.target.value })
                         }
+                        onBlur={commitColumnsToBackend}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.currentTarget.blur()
+                          }
+                        }}
                       />
                     </div>
                   </div>
@@ -2278,7 +2399,7 @@ export function App() {
                         type="checkbox"
                         checked={Boolean(selectedCol.put_link)}
                         onChange={(e) =>
-                          updateSelectedColumn({ put_link: e.target.checked })
+                          updateSelectedColumnImmediate({ put_link: e.target.checked })
                         }
                       />
                       <div className="dm-checkbox-text">
@@ -2298,7 +2419,7 @@ export function App() {
                         type="checkbox"
                         checked={Boolean(selectedCol.retrieve_all)}
                         onChange={(e) =>
-                          updateSelectedColumn({
+                          updateSelectedColumnImmediate({
                             retrieve_all: e.target.checked,
                             retrieve_all_mode:
                               selectedCol.retrieve_all_mode ||
@@ -2348,7 +2469,9 @@ export function App() {
                                   currentMode === item.mode ? 'active' : ''
                                 }`}
                                 onClick={() =>
-                                  updateSelectedColumn({ retrieve_all_mode: item.mode })
+                                  updateSelectedColumnImmediate({
+                                    retrieve_all_mode: item.mode,
+                                  })
                                 }
                               >
                                 {item.label}
@@ -2472,7 +2595,7 @@ export function App() {
                   }
                   const num = parseInt(val, 10)
                   if (!Number.isNaN(num)) {
-                    setRequestedLinesInput(String(Math.max(1, Math.min(1000, num))))
+                    setRequestedLinesInput(num > 1000 ? '1000' : val)
                   }
                 }}
                 onBlur={() => {
@@ -2691,74 +2814,18 @@ export function App() {
                                 c.name.trim().toUpperCase() === headerName.trim().toUpperCase()
                             )
                             const cellVal = getCellValue(row, headerName)
-                            const cellStr = String(cellVal ?? '')
                             const linkUrl = getCellLink(row, headerName, matchingCol)
-                            const isMultiLine = cellStr.includes('\n')
 
                             return (
-                              <td
+                              <MemoizedSheetCell
                                 key={headerName}
-                                rowSpan={span > 1 ? span : undefined}
-                                className={span > 1 ? 'dm-merged-cell' : undefined}
-                              >
-                                <div className="dm-cell-inner">
-                                  {isMultiLine ? (
-                                    <textarea
-                                      className="dm-sheet-cell-textarea"
-                                      rows={Math.min(5, cellStr.split('\n').length)}
-                                      value={cellStr}
-                                      onChange={(e) =>
-                                        handleNewDataCellChange(
-                                          originalIndex,
-                                          headerName,
-                                          e.target.value
-                                        )
-                                      }
-                                      onBlur={handleNewDataCellBlur}
-                                    />
-                                  ) : (
-                                    <input
-                                      type="text"
-                                      className={`dm-sheet-cell-input ${
-                                        linkUrl ? 'dm-linked-cell-input' : ''
-                                      }`}
-                                      value={cellVal}
-                                      onChange={(e) =>
-                                        handleNewDataCellChange(
-                                          originalIndex,
-                                          headerName,
-                                          e.target.value
-                                        )
-                                      }
-                                      onBlur={handleNewDataCellBlur}
-                                    />
-                                  )}
-                                  {(linkUrl || span > 1) && (
-                                    <div className="dm-cell-badges">
-                                      {linkUrl && (
-                                        <a
-                                          href={linkUrl}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="dm-cell-link-badge"
-                                          title={`Open webpage: ${linkUrl}`}
-                                          onClick={(e) => e.stopPropagation()}
-                                        >
-                                          🔗 Link ↗
-                                        </a>
-                                      )}
-                                      {span > 1 && (
-                                        <span
-                                          className="dm-cell-merged-badge"
-                                          title={`Vertically merged across ${span} rows`}
-                                        >
-                                          ↕ {span} rows
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              </td>
+                                rowIndex={originalIndex}
+                                colName={headerName}
+                                value={cellVal}
+                                linkUrl={linkUrl}
+                                span={span}
+                                onCommit={handleCommitNewDataCell}
+                              />
                             )
                           })}
                         </tr>
@@ -2890,6 +2957,17 @@ export function App() {
                   onChange={(e) => setGeminiApiKey(e.target.value)}
                 />
               </div>
+              <div className="dm-auth-field">
+                <label>Backend API Base URL (optional override for Vercel / remote backend)</label>
+                <input
+                  type="text"
+                  placeholder={
+                    import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+                  }
+                  value={customApiBaseUrl}
+                  onChange={(e) => setCustomApiBaseUrl(e.target.value)}
+                />
+              </div>
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
                 <button
                   type="button"
@@ -2903,7 +2981,7 @@ export function App() {
                   className="dm-header-btn"
                   style={{ background: '#ffa000', borderColor: '#ffa000' }}
                 >
-                  Save Key
+                  Save Settings
                 </button>
               </div>
             </form>
