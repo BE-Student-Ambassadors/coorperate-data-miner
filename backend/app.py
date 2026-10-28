@@ -1,4 +1,6 @@
 import csv
+import difflib
+import functools
 import io
 import json
 import os
@@ -1258,29 +1260,96 @@ SALARY_RANGES_POOL = [
 ]
 
 
+_WS_RE = re.compile(r"\s+")
+_PAREN_RE = re.compile(r"\([^)]*\)")
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]")
+
+
+@functools.lru_cache(maxsize=65536)
+def _normalize_entity_cached(s: str) -> str:
+    return _WS_RE.sub(" ", s.strip().lower())
+
+
+@functools.lru_cache(maxsize=65536)
+def _normalize_name_core_cached(s: str) -> str:
+    s = _PAREN_RE.sub(" ", s.strip().lower())
+    s = _NON_ALNUM_RE.sub("", s)
+    return " ".join(s.split())
+
+
 def _normalize_entity_str(val: Any) -> str:
     if val is None:
         return ""
-    s = str(val).strip().lower()
-    # Remove parenthetical nicknames like "Shengze (William) Wang" -> also compare base tokens
-    s = re.sub(r"\s+", " ", s)
-    return s
+    return _normalize_entity_cached(str(val))
 
 
 def _normalize_name_core(val: Any) -> str:
     if val is None:
         return ""
-    s = str(val).strip().lower()
-    s = re.sub(r"\([^)]*\)", " ", s)
-    s = re.sub(r"[^a-z0-9\s]", "", s)
-    return " ".join(s.split())
+    return _normalize_name_core_cached(str(val))
+
+
+# Fuzzy near-duplicate matching ("Jon Smith" vs "John Smith").
+# Uses a deletion-neighborhood index (SymSpell-style): two strings within edit distance 1 always
+# share at least one "delete one character" variant, so a lookup is ~len(name) dict probes instead
+# of scanning every stored name. Hits are then verified with a similarity ratio so short names
+# (where one edit is a big change) are not wrongly merged.
+FUZZY_THRESHOLD = 0.92
+FUZZY_MIN_LEN = 6
+FUZZY_MAX_LEN = 40
+
+
+def _delete_variants(core: str) -> set[str]:
+    variants = {core}
+    for i in range(len(core)):
+        variants.add(core[:i] + core[i + 1:])
+    return variants
+
+
+class _FuzzyNameIndex:
+    def __init__(self) -> None:
+        self.index: Dict[str, List[str]] = {}
+
+    def add(self, core: str) -> None:
+        if not (FUZZY_MIN_LEN <= len(core) <= FUZZY_MAX_LEN):
+            return
+        for variant in _delete_variants(core):
+            self.index.setdefault(variant, []).append(core)
+
+    def has_similar(self, core: str) -> bool:
+        if not (FUZZY_MIN_LEN <= len(core) <= FUZZY_MAX_LEN):
+            return False
+        checked: set[str] = set()
+        for variant in _delete_variants(core):
+            for other in self.index.get(variant, ()):
+                if other in checked:
+                    continue
+                checked.add(other)
+                sm = difflib.SequenceMatcher(None, core, other, autojunk=False)
+                if sm.ratio() >= FUZZY_THRESHOLD:
+                    return True
+        return False
+
+
+def _token_sorted_key(core: str) -> str:
+    """Order-insensitive key so 'Smith John' matches 'John Smith'. Empty for single tokens."""
+    tokens = core.split()
+    if len(tokens) < 2:
+        return ""
+    return " ".join(sorted(tokens))
 
 
 class DeduplicationEngine:
     """
     Guarantees that newly generated rows NEVER repeat any record from Existing Data
     (across all worksheet tabs in the project) and NEVER repeat within the new batch.
+
+    Exact checks are O(1) hash-set lookups. Name-like columns additionally get an
+    order-insensitive match and a blocked fuzzy match for near-duplicate spellings.
     """
+
+    _ALIAS_KEYS = ("NAME", "FULL NAME", "EMAIL", "CONTACT EMAIL")
+    _ALIAS_FUZZY_KEYS = ("NAME", "FULL NAME")
 
     def __init__(self, existing_rows: List[Dict[str, Any]], columns: List[Dict[str, Any]]):
         self.columns = columns
@@ -1308,13 +1377,44 @@ class DeduplicationEngine:
         if not self.main_cols and self.col_names:
             self.main_cols = [self.col_names[0]]
 
+        # Fuzzy matching only makes sense for human-name-like text, never emails/links/ids.
+        self.fuzzy_cols: set[str] = {
+            mc for mc in self.main_cols
+            if not any(k in mc.strip().upper() for k in ("EMAIL", "LINK", "URL"))
+        }
+
         self.seen_entities: set[str] = set()
         self.seen_name_cores: set[str] = set()
+        self.seen_token_keys: set[str] = set()
         self.seen_row_sigs: set[Tuple[str, ...]] = set()
         self.seen_composite_keys: set[Tuple[str, ...]] = set()
+        self._fuzzy = _FuzzyNameIndex()
 
         for r in existing_rows:
             self.register_existing(r)
+
+    def _identities(
+        self, row: Dict[str, Any], include_aliases: bool
+    ) -> List[Tuple[str, str, bool]]:
+        """Normalize each identity cell exactly once -> [(entity, name_core, fuzzy_eligible)]."""
+        out: List[Tuple[str, str, bool]] = []
+        seen: set[Tuple[str, str, bool]] = set()
+
+        def add(raw: Any, fuzzy: bool) -> None:
+            item = (_normalize_entity_str(raw), _normalize_name_core(raw), fuzzy)
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+
+        for mc in self.main_cols:
+            add(row.get(mc, ""), mc in self.fuzzy_cols)
+        if include_aliases:
+            # Also catch rows whose headers differ slightly in casing/spacing
+            for k, v in row.items():
+                ku = k.strip().upper()
+                if ku in self._ALIAS_KEYS:
+                    add(v, ku in self._ALIAS_FUZZY_KEYS)
+        return out
 
     def register_existing(self, row: Dict[str, Any]) -> None:
         if not isinstance(row, dict):
@@ -1325,28 +1425,22 @@ class DeduplicationEngine:
             self.seen_row_sigs.add(sig)
 
         # Primary entity values
-        for mc in self.main_cols:
-            val = _normalize_entity_str(row.get(mc, ""))
-            if val and len(val) > 1:
-                self.seen_entities.add(val)
-            core = _normalize_name_core(row.get(mc, ""))
+        for ent, core, fuzzy in self._identities(row, include_aliases=True):
+            if ent and len(ent) > 1:
+                self.seen_entities.add(ent)
             if core and len(core) > 1:
-                self.seen_name_cores.add(core)
-
-        # Also check case-insensitive key match in case row has slightly different casing
-        for k, v in row.items():
-            if k.strip().upper() in ("NAME", "FULL NAME", "EMAIL", "CONTACT EMAIL"):
-                val = _normalize_entity_str(v)
-                if val and len(val) > 1:
-                    self.seen_entities.add(val)
-                core = _normalize_name_core(v)
-                if core and len(core) > 1:
+                if core not in self.seen_name_cores:
                     self.seen_name_cores.add(core)
+                    if fuzzy:
+                        self._fuzzy.add(core)
+                token_key = _token_sorted_key(core)
+                if token_key:
+                    self.seen_token_keys.add(token_key)
 
-        # Composite signature across first 3 non-empty columns
-        non_empty_vals = [_normalize_entity_str(row.get(c, "")) for c in self.col_names[:4]]
-        if any(non_empty_vals):
-            self.seen_composite_keys.add(tuple(non_empty_vals))
+        # Composite signature across the first 4 columns
+        comp = sig[:4]
+        if any(comp):
+            self.seen_composite_keys.add(comp)
 
     def is_duplicate(self, candidate: Dict[str, Any]) -> bool:
         if not isinstance(candidate, dict):
@@ -1357,15 +1451,19 @@ class DeduplicationEngine:
         if sig in self.seen_row_sigs:
             return True
 
-        for mc in self.main_cols:
-            val = _normalize_entity_str(candidate.get(mc, ""))
-            if val and val in self.seen_entities:
+        for ent, core, fuzzy in self._identities(candidate, include_aliases=False):
+            if ent and ent in self.seen_entities:
                 return True
-            core = _normalize_name_core(candidate.get(mc, ""))
-            if core and core in self.seen_name_cores:
-                return True
+            if core:
+                if core in self.seen_name_cores:
+                    return True
+                token_key = _token_sorted_key(core)
+                if token_key and token_key in self.seen_token_keys:
+                    return True
+                if fuzzy and self._fuzzy.has_similar(core):
+                    return True
 
-        comp = tuple(_normalize_entity_str(candidate.get(c, "")) for c in self.col_names[:4])
+        comp = sig[:4]
         if any(comp) and comp in self.seen_composite_keys:
             return True
 
