@@ -54,6 +54,17 @@ export interface AgentRunMeta {
   batches_run?: number
 }
 
+export interface FetchProgress {
+  run_id: string
+  status: 'running' | 'done' | 'error'
+  requested: number
+  found: number
+  log: { t: number; msg: string }[]
+  started_at: string
+  updated_at: string
+  stop_reason?: AgentRunMeta['stop_reason']
+}
+
 export interface GSheetSyncMeta {
   synced: boolean
   mode?: string
@@ -83,6 +94,7 @@ export interface Project {
   tsv_rows_only?: string
   tsv_with_headers?: string
   last_agent_run?: AgentRunMeta | null
+  fetch_progress?: FetchProgress | null
   gsheet_sync?: GSheetSyncMeta | null
 }
 
@@ -288,6 +300,7 @@ export async function runFetchDataAgent(
     append_rows?: boolean
     agent_mode?: 'gemini-3.8-flash' | 'antigravity-agent' | 'gemini-4-argon'
     gemini_api_key?: string
+    run_id?: string
   }
 ): Promise<Project> {
   const headers = await getAuthHeaders()
@@ -299,6 +312,35 @@ export async function runFetchDataAgent(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || 'Failed to run AI agent data fetch')
+  }
+  return res.json()
+}
+
+export async function getFetchProgress(
+  projectId: string,
+  since: number
+): Promise<{ progress: FetchProgress | null; total_rows: number; rows: SheetRow[] }> {
+  const headers = await getAuthHeaders(false)
+  const res = await fetch(
+    `${getApiBase()}/api/projects/${projectId}/fetch-progress?since=${since}`,
+    { headers }
+  )
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to read fetch progress')
+  }
+  return res.json()
+}
+
+export async function clearNewData(projectId: string): Promise<Project> {
+  const headers = await getAuthHeaders(false)
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/new-data`, {
+    method: 'DELETE',
+    headers,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to clear new data')
   }
   return res.json()
 }

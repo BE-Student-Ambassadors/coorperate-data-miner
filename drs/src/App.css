@@ -1202,6 +1202,48 @@
   cursor: wait;
 }
 
+.dm-clear-new-data-btn {
+  margin-top: 8px;
+  padding: 6px 14px;
+  background: transparent;
+  border: 1px solid #d1d5db;
+  color: #7f1d1d;
+  font-size: 0.84rem;
+  cursor: pointer;
+}
+
+.dm-clear-new-data-btn:hover {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+
+.dm-fetch-log {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 0.8rem;
+}
+
+.dm-fetch-log li {
+  padding: 3px 0;
+  border-top: 1px solid #fde68a;
+  overflow-wrap: anywhere;
+}
+
+.dm-fetch-log-time {
+  display: inline-block;
+  min-width: 3.2em;
+  color: #b45309;
+  font-variant-numeric: tabular-nums;
+}
+
+.dm-fetch-log-empty {
+  margin-top: 6px;
+  font-size: 0.8rem;
+}
+
 /* Agent Status Banner */
 .dm-agent-banner {
   margin-top: 14px;
