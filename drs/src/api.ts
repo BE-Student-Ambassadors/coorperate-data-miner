@@ -86,13 +86,25 @@ export interface GSheetSyncMeta {
   reason?: string
 }
 
+export interface ProjectMember {
+  email: string
+  role: 'viewer' | 'editor'
+  added_at?: string
+  added_by?: string
+}
+
+export type ProjectRole = 'owner' | ProjectMember['role']
+
 export interface Project {
   id: string
   name: string
   owner_uid: string
   owner_email?: string
+  members?: Record<string, ProjectMember>
+  member_uids?: string[]
   created_at?: string
   last_edited: string
+  last_edited_by?: string
   existing_data_source: string
   existing_data_type: 'csv' | 'gsheets' | 'none'
   active_tab_id: string
@@ -374,6 +386,49 @@ export async function clearNewData(projectId: string): Promise<Project> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || 'Failed to clear new data')
+  }
+  return res.json()
+}
+
+export async function getProjectVersion(
+  projectId: string
+): Promise<{ last_edited: string; last_edited_by: string; my_role: ProjectRole }> {
+  const headers = await getAuthHeaders(false)
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/version`, { headers })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to check for project updates')
+  }
+  return res.json()
+}
+
+export async function shareProject(
+  projectId: string,
+  email: string,
+  role: ProjectMember['role']
+): Promise<Project> {
+  const headers = await getAuthHeaders()
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/members`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ email, role }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to share project')
+  }
+  return res.json()
+}
+
+export async function removeProjectMember(projectId: string, memberUid: string): Promise<Project> {
+  const headers = await getAuthHeaders(false)
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/members/${memberUid}`, {
+    method: 'DELETE',
+    headers,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to remove member')
   }
   return res.json()
 }

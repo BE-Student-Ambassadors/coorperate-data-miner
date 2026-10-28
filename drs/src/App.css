@@ -1243,6 +1243,15 @@
   cursor: wait;
 }
 
+.dm-fetch-stalled {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid #fca5a5;
+  background: #fef2f2;
+  color: #7f1d1d;
+  font-size: 0.8rem;
+}
+
 .dm-fetch-note {
   margin-top: 4px;
   font-size: 0.8rem;
@@ -1311,3 +1320,134 @@
   margin-bottom: 12px;
   font-weight: 400;
 }
+
+/* Project sharing */
+.dm-shared-tag {
+  margin-left: 10px;
+  padding: 1px 8px;
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #3730a3;
+  font-size: 0.74rem;
+  white-space: nowrap;
+}
+
+.dm-live-note {
+  align-self: center;
+  font-size: 0.8rem;
+  color: #3730a3;
+}
+
+.dm-verify-banner,
+.dm-viewonly-banner {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #312e81;
+  font-size: 0.86rem;
+}
+
+.dm-verify-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dm-verify-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dm-verify-note {
+  flex-basis: 100%;
+  font-size: 0.8rem;
+}
+
+.dm-readonly-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.dm-share-modal {
+  max-width: 520px;
+}
+
+.dm-member-list {
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dm-member-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid #e5e7eb;
+  font-size: 0.88rem;
+}
+
+.dm-member-email {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.dm-member-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.dm-member-role {
+  color: #6b7280;
+  font-size: 0.82rem;
+}
+
+.dm-member-remove {
+  padding: 2px 10px;
+  border: 1px solid #fca5a5;
+  background: #ffffff;
+  color: #7f1d1d;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.dm-member-remove:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.dm-share-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dm-share-form input {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  font-size: 0.88rem;
+}
+
+.dm-share-hint {
+  margin: 8px 0 0;
+  color: #6b7280;
+  font-size: 0.8rem;
+}
+
+.dm-share-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+

@@ -9,6 +9,7 @@ import React, {
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
+  sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
@@ -24,8 +25,11 @@ import {
   fetchProjects,
   getFetchProgress,
   getProject,
+  getProjectVersion,
   importGoogleSheet,
+  removeProjectMember,
   runFetchDataAgent,
+  shareProject,
   syncGoogleSheet,
   updateProject,
   updateSheetCell,
@@ -35,6 +39,8 @@ import {
   type FilterOp,
   type MCPConnector,
   type Project,
+  type ProjectMember,
+  type ProjectRole,
   type QueryType,
   type RetrieveAllMode,
   type SheetRow,
@@ -430,6 +436,7 @@ interface SheetCellProps {
   linkUrl: string
   span: number
   onCommit: (rowIndex: number, colName: string, newValue: string) => void
+  readOnly?: boolean
 }
 
 /**
@@ -444,6 +451,7 @@ const MemoizedSheetCell = React.memo(function MemoizedSheetCell({
   linkUrl,
   span,
   onCommit,
+  readOnly = false,
 }: SheetCellProps) {
   const externalStr = String(value ?? '')
   const [draft, setDraft] = useState<string>(externalStr)
@@ -471,6 +479,7 @@ const MemoizedSheetCell = React.memo(function MemoizedSheetCell({
             className="dm-sheet-cell-textarea"
             rows={Math.min(5, Math.max(2, draft.split('\n').length))}
             value={draft}
+            readOnly={readOnly}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={(e) => commitIfChanged(e.target.value)}
           />
@@ -479,6 +488,7 @@ const MemoizedSheetCell = React.memo(function MemoizedSheetCell({
             type="text"
             className={`dm-sheet-cell-input ${linkUrl ? 'dm-linked-cell-input' : ''}`}
             value={draft}
+            readOnly={readOnly}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={(e) => commitIfChanged(e.target.value)}
             onKeyDown={(e) => {
@@ -545,6 +555,14 @@ export function App() {
   const [statusError, setStatusError] = useState('')
   const [startingFetch, setStartingFetch] = useState(false)
   const [stoppingFetch, setStoppingFetch] = useState(false)
+  const [showShareModal, setShowShareModal] = useState(false)
+  const [shareEmail, setShareEmail] = useState('')
+  const [shareRole, setShareRole] = useState<ProjectMember['role']>('editor')
+  const [sharingBusy, setSharingBusy] = useState(false)
+  const [shareError, setShareError] = useState('')
+  const [liveUpdateNote, setLiveUpdateNote] = useState('')
+  const [verificationNote, setVerificationNote] = useState('')
+  const [verifiedAfterReload, setVerifiedAfterReload] = useState(false)
   const [agentPrompt, setAgentPrompt] = useState('')
   const [agentMode, setAgentMode] = useState<
     'gemini-3.8-flash' | 'antigravity-agent' | 'gemini-4-argon'
@@ -583,6 +601,16 @@ export function App() {
   const backgroundFetch =
     activeProject?.fetch_progress?.status === 'running' ? activeProject.fetch_progress : null
   const fetchingData = startingFetch || backgroundFetch !== null
+  // A healthy background run saves progress at least once a minute.
+  const [stallClock, setStallClock] = useState(() => Date.now())
+  const fetchUpdatedAt = backgroundFetch?.updated_at
+  useEffect(() => {
+    if (!fetchUpdatedAt) return
+    const timer = setInterval(() => setStallClock(Date.now()), 15000)
+    return () => clearInterval(timer)
+  }, [fetchUpdatedAt])
+  const fetchStalled =
+    !!fetchUpdatedAt && stallClock - Date.parse(fetchUpdatedAt) > 3 * 60 * 1000
   const activeProjectId = activeProject?.id
   const runningFetchId = backgroundFetch?.run_id
 
@@ -631,6 +659,63 @@ export function App() {
     activeProjectRef.current = activeProject
   }, [activeProject])
 
+  const myRole: ProjectRole | null =
+    !activeProject || !user
+      ? null
+      : activeProject.owner_uid === user.uid
+      ? 'owner'
+      : activeProject.members?.[user.uid]?.role ?? null
+  const readOnly = myRole === 'viewer'
+  const isEmailVerified = !!user?.emailVerified || verifiedAfterReload
+  const savingStatusRef = useRef(savingStatus)
+  useEffect(() => {
+    savingStatusRef.current = savingStatus
+  }, [savingStatus])
+
+  // Pick up changes made elsewhere (collaborators, or this account in another tab). They are applied
+  // only while this user is idle, so in-progress typing and unsaved edits are never overwritten.
+  const currentUserEmail = user?.email ?? ''
+  useEffect(() => {
+    if (!activeProjectId) return
+    let stopped = false
+    const timer = setInterval(async () => {
+      const focused = document.activeElement
+      const editing =
+        focused instanceof HTMLElement &&
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(focused.tagName) &&
+        focused.closest('.dm-main, .dm-header') !== null
+      if (editing || savingStatusRef.current === 'saving' || savingStatusRef.current === 'syncing-gsheet') {
+        return
+      }
+      try {
+        const version = await getProjectVersion(activeProjectId)
+        const current = activeProjectRef.current
+        if (stopped || !current || current.id !== activeProjectId) return
+        if (!version.last_edited || version.last_edited === current.last_edited) return
+        const fresh = await getProject(activeProjectId)
+        if (stopped || activeProjectRef.current?.id !== activeProjectId) return
+        setActiveProject(fresh)
+        setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)))
+        if (version.last_edited_by && version.last_edited_by !== currentUserEmail) {
+          setLiveUpdateNote(`Updated by ${version.last_edited_by}`)
+          setTimeout(() => setLiveUpdateNote(''), 5000)
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : ''
+        if (!stopped && /not authorized|not found/i.test(msg)) {
+          // Removed from the project (or it was deleted) while it was open.
+          setProjects((prev) => prev.filter((p) => p.id !== activeProjectId))
+          setActiveProject(null)
+          setStatusError('That project is no longer shared with you.')
+        }
+      }
+    }, 5000)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [activeProjectId, currentUserEmail])
+
   // Observe Firebase Auth state
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (firebaseUser) => {
@@ -673,7 +758,9 @@ export function App() {
       if (authMode === 'login') {
         await signInWithEmailAndPassword(auth, email.trim(), password)
       } else {
-        await createUserWithEmailAndPassword(auth, email.trim(), password)
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password)
+        // Sharing only works with verified emails, so start verification right away.
+        await sendEmailVerification(cred.user).catch(() => undefined)
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Authentication failed'
@@ -773,6 +860,85 @@ export function App() {
       openProject(created)
     } catch (err: unknown) {
       setStatusError(err instanceof Error ? err.message : 'Could not create project')
+    }
+  }
+
+  function applyServerProject(updated: Project) {
+    setActiveProject(updated)
+    setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
+  }
+
+  async function handleShareSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!activeProject || !shareEmail.trim()) return
+    setSharingBusy(true)
+    setShareError('')
+    try {
+      applyServerProject(await shareProject(activeProject.id, shareEmail.trim(), shareRole))
+      setShareEmail('')
+    } catch (err: unknown) {
+      setShareError(err instanceof Error ? err.message : 'Failed to share project')
+    } finally {
+      setSharingBusy(false)
+    }
+  }
+
+  async function handleChangeMemberRole(memberEmail: string, role: ProjectMember['role']) {
+    if (!activeProject) return
+    setSharingBusy(true)
+    setShareError('')
+    try {
+      applyServerProject(await shareProject(activeProject.id, memberEmail, role))
+    } catch (err: unknown) {
+      setShareError(err instanceof Error ? err.message : 'Failed to change access')
+    } finally {
+      setSharingBusy(false)
+    }
+  }
+
+  async function handleRemoveMember(memberUid: string) {
+    if (!activeProject || !user) return
+    const leaving = memberUid === user.uid
+    if (leaving && !window.confirm(`Leave "${activeProject.name}"? You will lose access to it.`)) return
+    setSharingBusy(true)
+    setShareError('')
+    try {
+      const updated = await removeProjectMember(activeProject.id, memberUid)
+      if (leaving) {
+        setShowShareModal(false)
+        setProjects((prev) => prev.filter((p) => p.id !== updated.id))
+        setActiveProject(null)
+      } else {
+        applyServerProject(updated)
+      }
+    } catch (err: unknown) {
+      setShareError(err instanceof Error ? err.message : 'Failed to remove member')
+    } finally {
+      setSharingBusy(false)
+    }
+  }
+
+  async function handleSendVerification() {
+    if (!auth.currentUser) return
+    try {
+      await sendEmailVerification(auth.currentUser)
+      setVerificationNote(
+        `Verification email sent to ${auth.currentUser.email}. Open the link in it, then click "I've verified".`
+      )
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to send verification email'
+      setVerificationNote(msg.replace('Firebase: ', ''))
+    }
+  }
+
+  async function handleRefreshVerification() {
+    if (!auth.currentUser) return
+    await auth.currentUser.reload()
+    if (auth.currentUser.emailVerified) {
+      setVerifiedAfterReload(true)
+      setVerificationNote('')
+    } else {
+      setVerificationNote('Not verified yet. Open the link in the verification email first.')
     }
   }
 
@@ -1585,6 +1751,23 @@ export function App() {
         <main className="dm-main">
           {statusError && <div className="dm-error-banner">{statusError}</div>}
 
+          {!isEmailVerified && (
+            <div className="dm-verify-banner">
+              <span>
+                Verify your email ({user.email}) so teammates can share projects with you.
+              </span>
+              <span className="dm-verify-actions">
+                <button type="button" className="dm-header-btn" onClick={handleSendVerification}>
+                  Send verification email
+                </button>
+                <button type="button" className="dm-header-btn" onClick={handleRefreshVerification}>
+                  I've verified
+                </button>
+              </span>
+              {verificationNote && <div className="dm-verify-note">{verificationNote}</div>}
+            </div>
+          )}
+
           <div className="dm-new-project-bar">
             <button
               type="button"
@@ -1640,18 +1823,35 @@ export function App() {
                     className={`dm-project-row clickable ${idx % 2 === 0 ? 'even' : 'odd'}`}
                     onClick={() => openProject(proj)}
                   >
-                    <div>{proj.name}</div>
+                    <div>
+                      {proj.name}
+                      {proj.owner_uid !== user.uid ? (
+                        <span className="dm-shared-tag">
+                          Shared by {proj.owner_email || 'another account'}
+                        </span>
+                      ) : (
+                        (proj.member_uids?.length ?? 0) > 0 && (
+                          <span className="dm-shared-tag">
+                            Shared with {proj.member_uids?.length}
+                          </span>
+                        )
+                      )}
+                    </div>
                     <div className="dm-project-date" style={{ textAlign: 'center' }}>
                       {formatLastEdited(proj.last_edited)}
                     </div>
-                    <button
-                      type="button"
-                      className="dm-project-delete-btn"
-                      title="Delete project"
-                      onClick={(e) => handleDeleteProject(e, proj.id)}
-                    >
-                      ✕
-                    </button>
+                    {proj.owner_uid === user.uid ? (
+                      <button
+                        type="button"
+                        className="dm-project-delete-btn"
+                        title="Delete project"
+                        onClick={(e) => handleDeleteProject(e, proj.id)}
+                      >
+                        ✕
+                      </button>
+                    ) : (
+                      <span />
+                    )}
                   </div>
                 ))}
 
@@ -1780,10 +1980,11 @@ export function App() {
               type="text"
               className="dm-project-name-input"
               value={activeProject.name}
+              readOnly={readOnly}
               onChange={(e) => setActiveProject({ ...activeProject, name: e.target.value })}
-              onBlur={() =>
-                persistProjectUpdates(activeProject, { name: activeProject.name })
-              }
+              onBlur={() => {
+                if (!readOnly) persistProjectUpdates(activeProject, { name: activeProject.name })
+              }}
             />
           </div>
         </div>
@@ -1796,6 +1997,21 @@ export function App() {
           >
             ← All Projects
           </button>
+          <button
+            type="button"
+            className="dm-header-btn"
+            onClick={() => {
+              setShareError('')
+              setShowShareModal(true)
+            }}
+          >
+            {myRole === 'owner'
+              ? `Share${activeProject.member_uids?.length ? ` (${activeProject.member_uids.length})` : ''}`
+              : myRole === 'viewer'
+              ? 'Shared · View only'
+              : 'Shared · Can edit'}
+          </button>
+          {liveUpdateNote && <span className="dm-live-note">{liveUpdateNote}</span>}
           <button
             type="button"
             className="dm-header-btn"
@@ -1830,6 +2046,14 @@ export function App() {
       <main className="dm-main">
         {statusError && <div className="dm-error-banner">{statusError}</div>}
 
+        {readOnly && (
+          <div className="dm-viewonly-banner">
+            You have view-only access to this project. Ask{' '}
+            {activeProject.owner_email || 'the owner'} for edit access.
+          </div>
+        )}
+
+        <fieldset className="dm-readonly-fieldset" disabled={readOnly}>
         {/* 1. EXISTING DATA SECTION */}
         <section className="dm-existing-data-section">
           <div className="dm-section-label">
@@ -2652,6 +2876,8 @@ export function App() {
           </div>
         </section>
 
+        </fieldset>
+
         {/* 4. AGENTIC AI PROMPT, LINE COUNT (1-1000) & FETCH DATA BUTTON */}
         <section>
           <div className="dm-agent-controls">
@@ -2660,6 +2886,7 @@ export function App() {
               className="dm-agent-prompt-input"
               placeholder={`Optional Agent scraping instructions for "${activeProject.name}" -> "${activeTab?.name}" (e.g., specific company, cohort, or target URL)...`}
               value={agentPrompt}
+              disabled={readOnly}
               onChange={(e) => setAgentPrompt(e.target.value)}
             />
 
@@ -2676,6 +2903,7 @@ export function App() {
                 min={1}
                 max={1000}
                 className="dm-line-count-input"
+                disabled={readOnly}
                 value={requestedLinesInput}
                 onChange={(e) => {
                   const val = e.target.value
@@ -2699,6 +2927,7 @@ export function App() {
 
             <select
               className="dm-agent-select"
+              disabled={readOnly}
               value={agentMode}
               onChange={(e) =>
                 setAgentMode(
@@ -2718,7 +2947,7 @@ export function App() {
           <button
             type="button"
             className="dm-fetch-btn"
-            disabled={fetchingData}
+            disabled={fetchingData || readOnly}
             onClick={handleFetchData}
           >
             {fetchingData
@@ -2746,13 +2975,19 @@ export function App() {
                   <button
                     type="button"
                     className="dm-stop-fetch-btn"
-                    disabled={stoppingFetch}
+                    disabled={stoppingFetch || readOnly}
                     onClick={handleStopFetch}
                   >
                     Stop
                   </button>
                 )}
               </div>
+              {fetchStalled && (
+                <div className="dm-fetch-stalled">
+                  No progress for over 3 minutes, so the background run may have stopped. Press
+                  Stop to keep anything found so far, then fetch again.
+                </div>
+              )}
               <div className="dm-fetch-note">
                 This runs in the background, so you can close this page.
                 {backgroundFetch?.notify_email
@@ -2774,7 +3009,7 @@ export function App() {
             </div>
           )}
 
-          {!fetchingData && (newRows.length > 0 || activeProject.last_agent_run) && (
+          {!fetchingData && !readOnly && (newRows.length > 0 || activeProject.last_agent_run) && (
             <button
               type="button"
               className="dm-clear-new-data-btn"
@@ -2969,6 +3204,7 @@ export function App() {
                                 linkUrl={linkUrl}
                                 span={span}
                                 onCommit={handleCommitNewDataCell}
+                                readOnly={readOnly}
                               />
                             )
                           })}
@@ -3082,6 +3318,112 @@ export function App() {
       )}
 
       {/* Modal: AI Settings */}
+      {showShareModal && (
+        <div className="dm-modal-backdrop" onClick={() => setShowShareModal(false)}>
+          <div className="dm-modal dm-share-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Share "{activeProject.name}"</h3>
+            <p className="dm-auth-subtitle">
+              Everyone on this project sees it in their project list and sees changes live.
+            </p>
+            <ul className="dm-member-list">
+              <li>
+                <span className="dm-member-email">
+                  {activeProject.owner_email || 'Owner'}
+                  {activeProject.owner_uid === user.uid ? ' (you)' : ''}
+                </span>
+                <span className="dm-member-role">Owner</span>
+              </li>
+              {Object.entries(activeProject.members || {}).map(([uid, member]) => (
+                <li key={uid}>
+                  <span className="dm-member-email">
+                    {member.email}
+                    {uid === user.uid ? ' (you)' : ''}
+                  </span>
+                  {myRole === 'owner' ? (
+                    <span className="dm-member-actions">
+                      <select
+                        value={member.role}
+                        disabled={sharingBusy}
+                        onChange={(e) =>
+                          handleChangeMemberRole(
+                            member.email,
+                            e.target.value as ProjectMember['role']
+                          )
+                        }
+                      >
+                        <option value="editor">Can edit</option>
+                        <option value="viewer">Can view</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="dm-member-remove"
+                        disabled={sharingBusy}
+                        onClick={() => handleRemoveMember(uid)}
+                      >
+                        Remove
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="dm-member-actions">
+                      <span className="dm-member-role">
+                        {member.role === 'editor' ? 'Can edit' : 'Can view'}
+                      </span>
+                      {uid === user.uid && (
+                        <button
+                          type="button"
+                          className="dm-member-remove"
+                          disabled={sharingBusy}
+                          onClick={() => handleRemoveMember(uid)}
+                        >
+                          Leave
+                        </button>
+                      )}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+
+            {myRole === 'owner' && (
+              <form className="dm-share-form" onSubmit={handleShareSubmit}>
+                <input
+                  type="email"
+                  placeholder="teammate@example.com"
+                  value={shareEmail}
+                  onChange={(e) => setShareEmail(e.target.value)}
+                  required
+                />
+                <select
+                  value={shareRole}
+                  onChange={(e) => setShareRole(e.target.value as ProjectMember['role'])}
+                >
+                  <option value="editor">Can edit</option>
+                  <option value="viewer">Can view</option>
+                </select>
+                <button
+                  type="submit"
+                  className="dm-header-btn"
+                  disabled={sharingBusy || !shareEmail.trim()}
+                >
+                  {sharingBusy ? 'Sharing…' : 'Share'}
+                </button>
+              </form>
+            )}
+            {shareError && <div className="dm-error-banner">{shareError}</div>}
+            {myRole === 'owner' && (
+              <p className="dm-share-hint">
+                They need an account with a verified email, and they'll get an email when you share.
+              </p>
+            )}
+            <div className="dm-share-footer">
+              <button type="button" className="dm-header-btn" onClick={() => setShowShareModal(false)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showAiKeyModal && (
         <div className="dm-modal-backdrop" onClick={() => setShowAiKeyModal(false)}>
           <div className="dm-modal" onClick={(e) => e.stopPropagation()}>
