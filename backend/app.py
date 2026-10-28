@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import csv
 import difflib
 import functools
@@ -6,10 +7,12 @@ import io
 import json
 import os
 import re
+import smtplib
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
@@ -23,6 +26,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from firebase_admin import auth as firebase_auth
 from firebase_admin import credentials, firestore
+from firebase_admin import functions as admin_functions
 from google import genai
 from pydantic import BaseModel, Field
 
@@ -1409,18 +1413,24 @@ def _row_matches_column_filters(row: Dict[str, Any], columns: List[Dict[str, Any
 # Agentic AI Scraper Engine (Gemini 3.8 Flash / Antigravity Agent / Gemini 4 Argon)
 # ---------------------------------------------------------------------------
 
-# Fetches run as many small model calls (FETCH_BATCH_SIZE rows each) instead of one huge response,
-# so a 1000-row request never depends on the model emitting hundreds of rows at once. Small batches
-# also return faster, so rows start appearing sooner.
-FETCH_BATCH_SIZE = max(1, int(os.getenv("FETCH_BATCH_SIZE", "5")))
+# Fetches run in two steps: discovery calls list many candidate Main-column values at once from pages
+# that list them, then parallel fill calls research a few specific candidates each. Parallel calls never
+# chase the same entities, and no single response has to carry hundreds of rows.
+FETCH_DISCOVERY_SIZE = max(1, int(os.getenv("FETCH_DISCOVERY_SIZE", "30")))
+FETCH_FILL_SIZE = max(1, int(os.getenv("FETCH_FILL_SIZE", "4")))
 FETCH_CONCURRENCY = max(1, int(os.getenv("FETCH_CONCURRENCY", "6")))
-# Must stay below the Cloud Function timeout in main.py so partial results are still returned and saved.
-FETCH_TIME_BUDGET_SEC = float(os.getenv("FETCH_TIME_BUDGET_SEC", "480"))
-# Consecutive low-yield batches before the direct query is considered exhausted.
-FETCH_MAX_DRY_BATCHES = 3
-FETCH_MAX_ERROR_BATCHES = 4
-FETCH_EXCLUDE_LIST_LIMIT = 250
+# Fetches run as background jobs split into chunks; each chunk must finish inside the task
+# function timeout in main.py (1800s), then saves its state and queues the next chunk.
+FETCH_CHUNK_SEC = float(os.getenv("FETCH_CHUNK_SEC", "1500"))
+FETCH_JOB_MAX_SEC = float(os.getenv("FETCH_JOB_MAX_HOURS", "6")) * 3600
+# A running chunk renews its lease on every save; an expired lease means the chunk died.
+FETCH_LEASE_SEC = 180
+# Consecutive discoveries yielding under 20% new candidates before the direct query counts as exhausted.
+FETCH_MAX_DRY_DISCOVERIES = 3
+FETCH_MAX_ERROR_CALLS = 4
+FETCH_EXCLUDE_LIST_LIMIT = 400
 FETCH_SEEDS_PER_ANGLE = 5
+FETCH_JOBS_COLLECTION = "fetch_jobs"
 
 _DIRECT_SEARCH_ANGLES = [
     "",
@@ -1434,7 +1444,9 @@ _DIRECT_SEARCH_ANGLES = [
 _STOP_REASON_TEXT = {
     "target_reached": "Requested row count reached.",
     "exhausted": "Search exhausted: the direct query and the Main-column expansion searches stopped finding new verifiable records.",
-    "time_budget": "Stopped at the time limit for one run. Copy these rows first: the next Fetch replaces them with further new rows (rows already found are skipped).",
+    "time_limit": f"Stopped at the {FETCH_JOB_MAX_SEC / 3600:g}-hour limit for one fetch.",
+    "cancelled": "Stopped by request.",
+    "error": "Stopped because of an unexpected error.",
     "api_error": "Stopped because the AI provider kept returning errors.",
     "no_api_key": "No Gemini API key configured, so no data could be fetched.",
 }
@@ -1504,20 +1516,86 @@ def _build_expansion_angles(
     return angles
 
 
-def _batch_task_prompt(batch_size: int, angle: str, exclude: List[str], source_names: str) -> str:
+def _discovery_schema(main_col_name: str) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "candidates": {
+                "type": "array",
+                "description": f"New, distinct `{main_col_name}` entries found listed on real pages. May be empty.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": f"The `{main_col_name}` value exactly as written on the source page.",
+                        },
+                        "source_url": {
+                            "type": "string",
+                            "description": "URL of the page where this entry is listed.",
+                        },
+                    },
+                    "required": ["name", "source_url"],
+                },
+            },
+            "agent_summary": {
+                "type": "string",
+                "description": "Brief summary of where the agent looked.",
+            },
+            "sources_consulted": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of web sources, domains, or MCP channels used.",
+            },
+        },
+        "required": ["candidates", "agent_summary", "sources_consulted"],
+    }
+
+
+def _discovery_prompt(size: int, angle: str, exclude: List[str], main_col_name: str, source_names: str) -> str:
     return f"""
-Already Collected (DO NOT RETURN ANY OF THESE):
+Already Known (DO NOT RETURN ANY OF THESE):
 {', '.join(exclude) if exclude else 'None'}
 
-Task for this batch:
-1. Search the web and prioritized sources ({source_names}) for up to {batch_size} real records that are NOT already collected or in the existing data.
-{f"2. Search focus: {angle}" if angle else "2. Search focus: the user's scraping goal above."}
-3. Every record must come from a real page you actually found. Put that page's URL in `_source_url`.
+Task for this step: discover candidates only.
+1. Search the web and prioritized sources ({source_names}) for up to {size} NEW, distinct "{main_col_name}" entries that fit the goal above.
+2. Prefer pages that list many entries at once: lists, directories, rosters, rankings, databases.
+{f"3. Search focus: {angle}" if angle else "3. Search focus: the user's scraping goal above."}
+4. Only return entries that actually appear on a page you found, with that page's URL in `source_url`. Never invent entries.
+5. Do not research the other columns yet; return only the entries and where they are listed.
+6. Returning fewer than {size} entries, or zero, is correct when no more exist.
+"""
+
+
+def _fill_prompt(candidates: List[Dict[str, str]], main_col_name: str, source_names: str) -> str:
+    listing = "\n".join(f"- {c['name']} (listed at {c['source_url']})" for c in candidates)
+    return f"""
+Task for this step: fill in records for exactly these "{main_col_name}" entries:
+{listing}
+
+1. Research each entry, starting with the page it is listed at and then the web and prioritized sources ({source_names}), and fill in every column.
+2. Return at most one record per entry, with `{main_col_name}` written exactly as given above. Do not add any other entities.
+3. Put the URL of the page that best verifies the record in `_source_url`.
 4. If you cannot verify a column's value from a source, return an empty string for it. Never guess, estimate, or invent names, values, or URLs.
 5. For `_links`, only include URLs you actually found; use an empty string otherwise. Never construct a URL from a name.
-6. Returning fewer than {batch_size} records, or zero, is correct when no more verifiable records exist.
+6. Leave an entry out entirely if it turns out not to fit the goal or the column rules.
 7. Format every cell to match the Google Sheet conventions above. Return JSON matching the schema.
 """
+
+
+def _match_candidate(value: Any, by_key: Dict[str, Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """The requested candidate a filled row belongs to, tolerating small spelling changes."""
+    key = _normalize_entity_str(value)
+    if not key:
+        return None
+    if key in by_key:
+        return by_key[key]
+    core = _normalize_name_core(value)
+    for cand_key, cand in by_key.items():
+        cand_core = _normalize_name_core(cand["name"])
+        if core and cand_core and len(min(core, cand_core, key=len)) > 3 and (core in cand_core or cand_core in core):
+            return cand
+    return None
 
 
 def _run_fetch_batch(
@@ -1605,23 +1683,16 @@ def _expand_more_rows(
     return block
 
 
-async def run_agentic_scraper(
+async def _prepare_fetch_context(
     project: Dict[str, Any],
     target_tab: Dict[str, Any],
     query_prompt: str,
-    row_count: int,
-    agent_mode: str,
-    override_api_key: Optional[str] = None,
-    on_progress: Optional[Callable[[str, List[Dict[str, Any]]], Awaitable[None]]] = None,
+    prior_new_rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
-    Fetches up to `row_count` real, source-backed rows. `on_progress(message, rows_so_far)` is awaited
-    after each step so callers can surface live progress.
+    Everything a fetch needs that is derived from the project: aligned columns, learned formats,
+    rows to deduplicate against, response schemas, and the shared prompt context.
     """
-    load_dotenv(BASE_DIR / ".env", override=True)
-    load_dotenv(BASE_DIR / ".env.example", override=False)
-
-    requested_count = max(1, min(int(row_count), 1000))
     all_tabs: List[Dict[str, Any]] = project.get("tabs", [])
 
     # If the currently active tab is a RULES! tab, use the primary data columns and first data tab's structure
@@ -1668,10 +1739,8 @@ async def run_agentic_scraper(
     for t in all_tabs:
         if not t.get("name", "").strip().upper().startswith("RULE"):
             all_existing_rows.extend(t.get("rows", []))
-    if project.get("new_rows"):
-        all_existing_rows.extend(project.get("new_rows", []))
+    all_existing_rows.extend(prior_new_rows)
 
-    dedup = DeduplicationEngine(all_existing_rows, columns)
     profiles = learn_sheet_format_profile(effective_tab, all_tabs, columns)
 
     mcps: List[Dict[str, Any]] = project.get("mcps", [])
@@ -1791,28 +1860,94 @@ Data Template Columns & Learned Google Sheet Formatting Rules:
 {f"Direct Web Page Context Scraped from Target URLs:{chr(10)}{scraped_web_context}" if scraped_web_context else ""}
 """
 
-    api_key = (override_api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-    accepted_new_rows: List[Dict[str, Any]] = []
-    sources_consulted: List[str] = []
-    model_used = agent_mode
-    stop_reason = "no_api_key"
-    batches_run = 0
-    last_error = ""
+    tools_config: List[Dict[str, Any]] = [
+        {"type": "google_search"},
+        {"type": "url_context"},
+    ]
+    for m in enabled_mcps:
+        srv_url = (m.get("server_url") or "").strip()
+        if srv_url.startswith("http"):
+            tools_config.append({
+                "type": "mcp_server",
+                "name": re.sub(r"[^a-zA-Z0-9_-]", "_", m.get("name", "custom_mcp").lower()),
+                "url": srv_url,
+            })
 
-    async def _report(message: str) -> None:
-        if on_progress is not None:
-            await on_progress(message, accepted_new_rows)
+    return {
+        "columns": columns,
+        "profiles": profiles,
+        "effective_tab": effective_tab,
+        "existing_rows": all_existing_rows,
+        "main_col_name": main_col_name,
+        "row_schema": output_json_schema,
+        "discovery_schema": _discovery_schema(main_col_name),
+        "base_prompt": base_prompt,
+        "source_names": source_names,
+        "mcp_names": mcp_names,
+        "tools_config": tools_config,
+        "headers": [c.get("name", "") for c in columns if c.get("name")],
+    }
 
-    def _accept(raw: Any) -> Tuple[List[Dict[str, Any]], str]:
+
+def _new_fetch_state() -> Dict[str, Any]:
+    """Resumable pipeline state, saved on the job document between background chunks."""
+    return {
+        "phase": "direct",
+        "direct_angle_idx": 0,
+        "expansion_angles": [],
+        "used_expansion_keys": [],
+        "candidates": [],
+        "seen_candidate_keys": [],
+        "dry_discoveries": 0,
+        "error_calls": 0,
+        "calls": 0,
+        "sources_consulted": [],
+        "model_used": "",
+        "last_error": "",
+    }
+
+
+async def run_fetch_pipeline(
+    ctx: Dict[str, Any],
+    state: Dict[str, Any],
+    rows: List[Dict[str, Any]],
+    requested_count: int,
+    agent_mode: str,
+    api_key: str,
+    deadline: float,
+    report: Callable[[str], Awaitable[None]],
+    should_stop: Callable[[], bool],
+) -> str:
+    """
+    Fills `rows` with real, source-backed records until `requested_count` is reached. Discovery calls
+    queue candidate Main-column values; fill calls research FETCH_FILL_SIZE queued candidates each, in
+    parallel. When discovery runs dry it expands from the Main columns' known values. `state` and
+    `rows` are mutated in place so the caller can save them and resume in a later chunk.
+
+    Returns a stop reason, or "chunk_time" when the loop-clock `deadline` passes first.
+    """
+    columns = ctx["columns"]
+    profiles = ctx["profiles"]
+    main_col = ctx["main_col_name"]
+    existing_rows = ctx["existing_rows"]
+
+    dedup = DeduplicationEngine(existing_rows, columns)
+    for r in rows:
+        dedup.register_existing(r)
+    seen_keys = set(state["seen_candidate_keys"])
+    for v in _entity_values(existing_rows + rows, main_col):
+        seen_keys.add(_normalize_entity_str(v))
+    used_expansion_keys = set(state["used_expansion_keys"])
+    queue: List[Dict[str, str]] = state["candidates"]
+
+    def _accept(raw: Dict[str, Any], fallback_source: str) -> Tuple[List[Dict[str, Any]], str]:
         """Returns the accepted row block, or an empty list and the reason it was skipped."""
-        if not isinstance(raw, dict):
-            return [], "malformed"
         source_url = str(raw.get("_source_url") or "").strip()
         if not source_url.startswith("http"):
-            return [], "no source"
+            source_url = fallback_source
         formatted_r = format_row_for_gsheets(raw, columns, profiles)
-        if not str(formatted_r.get(main_col_name, "") or "").strip():
-            return [], f"no {main_col_name}"
+        if not str(formatted_r.get(main_col, "") or "").strip():
+            return [], f"no {main_col}"
         raw_links = raw.get("_links") if isinstance(raw.get("_links"), dict) else {}
         links_for_r = {
             c["name"]: str(raw_links.get(c["name"], "")).strip()
@@ -1833,187 +1968,470 @@ Data Template Columns & Learned Google Sheet Formatting Rules:
             dedup.register_existing(cont_r)
         return block, ""
 
-    if not api_key:
-        await _report("No Gemini API key configured; nothing was fetched.")
-    else:
-        client = genai.Client(api_key=api_key)
-
-        tools_config: List[Dict[str, Any]] = [
-            {"type": "google_search"},
-            {"type": "url_context"},
-        ]
-        for m in enabled_mcps:
-            srv_url = (m.get("server_url") or "").strip()
-            if srv_url.startswith("http"):
-                tools_config.append({
-                    "type": "mcp_server",
-                    "name": re.sub(r"[^a-zA-Z0-9_-]", "_", m.get("name", "custom_mcp").lower()),
-                    "url": srv_url,
-                })
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + FETCH_TIME_BUDGET_SEC
-        # A dedicated executor so calls still running when we stop never hold up the response
-        # (asyncio.run waits on the default executor at shutdown).
-        executor = ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY)
-        in_flight: Dict["asyncio.Future[Tuple[Dict[str, Any], str]]", Tuple[int, str]] = {}
-        phase = "direct"
-        direct_angle_idx = 0
-        expansion_angles: List[str] = []
-        used_expansion_keys: set[str] = set()
-        dry_batches = 0
-        error_batches = 0
-
-        await _report(
-            f"Searching for {requested_count} rows with {agent_mode} "
-            f"({FETCH_BATCH_SIZE} rows per batch, up to {FETCH_CONCURRENCY} batches in parallel)."
-        )
-        try:
-            while True:
-                remaining = requested_count - len(accepted_new_rows)
-                if remaining <= 0:
-                    stop_reason = "target_reached"
-                    break
-                if loop.time() >= deadline:
-                    stop_reason = "time_budget"
-                    break
-
-                # Phase 2: once the direct query runs dry, search outward from the Main columns' entities.
-                if phase == "expand" and not expansion_angles and not in_flight:
-                    expansion_angles = _build_expansion_angles(
-                        columns, profiles, accepted_new_rows + all_existing_rows, used_expansion_keys
-                    )
-                    if not expansion_angles:
-                        stop_reason = "exhausted"
-                        break
-                    await _report(f"Expanding the search from Main-column values ({len(expansion_angles)} new search angles).")
-
-                # Keep the pool full: start a new batch as soon as one finishes, assuming roughly
-                # 3 in 4 returned rows survive source, filter, and duplicate checks.
-                in_flight_capacity = sum(size for size, _ in in_flight.values())
-                while len(in_flight) < FETCH_CONCURRENCY and in_flight_capacity * 0.75 < remaining:
-                    if phase == "direct":
-                        angle = _DIRECT_SEARCH_ANGLES[direct_angle_idx % len(_DIRECT_SEARCH_ANGLES)]
-                        direct_angle_idx += 1
-                    elif expansion_angles:
-                        angle = expansion_angles.pop(0)
-                    else:
-                        break
-                    exclude = _entity_values(accepted_new_rows[::-1] + all_existing_rows, main_col_name)[
-                        :FETCH_EXCLUDE_LIST_LIMIT
-                    ]
-                    fut = loop.run_in_executor(
-                        executor,
-                        _run_fetch_batch,
-                        client,
-                        agent_mode,
-                        base_prompt + _batch_task_prompt(FETCH_BATCH_SIZE, angle, exclude, source_names),
-                        output_json_schema,
-                        tools_config,
-                    )
-                    in_flight[fut] = (FETCH_BATCH_SIZE, angle)
-                    in_flight_capacity += FETCH_BATCH_SIZE
-
-                if not in_flight:
-                    continue
-
-                done, _ = await asyncio.wait(
-                    list(in_flight),
-                    timeout=max(0.5, deadline - loop.time()),
-                    return_when=asyncio.FIRST_COMPLETED,
+    async def _next_discovery_angle() -> Optional[str]:
+        if state["phase"] == "direct":
+            angle = _DIRECT_SEARCH_ANGLES[state["direct_angle_idx"] % len(_DIRECT_SEARCH_ANGLES)]
+            state["direct_angle_idx"] += 1
+            return angle
+        if not state["expansion_angles"]:
+            state["expansion_angles"] = _build_expansion_angles(
+                columns, profiles, rows + existing_rows, used_expansion_keys
+            )
+            state["used_expansion_keys"] = sorted(used_expansion_keys)
+            if state["expansion_angles"]:
+                await report(
+                    f"Expanding the search from Main-column values ({len(state['expansion_angles'])} new search angles)."
                 )
-                if not done:
-                    stop_reason = "time_budget"
-                    break
+        return state["expansion_angles"].pop(0) if state["expansion_angles"] else None
 
-                for fut in done:
-                    size, angle = in_flight.pop(fut)
-                    exc = fut.exception()
-                    if exc is not None:
-                        error_batches += 1
-                        last_error = str(exc)[:120]
-                        await _report(f"A search batch failed: {last_error}")
-                        continue
-                    error_batches = 0
-                    parsed, model_used = fut.result()
-                    batches_run += 1
+    client = genai.Client(api_key=api_key)
+    loop = asyncio.get_running_loop()
+    # A dedicated executor so calls still running when we stop never hold up the response
+    # (asyncio.run waits on the default executor at shutdown).
+    executor = ThreadPoolExecutor(max_workers=FETCH_CONCURRENCY)
+    in_flight: Dict["asyncio.Future[Tuple[Dict[str, Any], str]]", Tuple[str, Any]] = {}
+    stop_reason = ""
 
-                    new_entities = 0
-                    skipped: Dict[str, int] = {}
-                    for raw in parsed.get("rows") or []:
-                        if len(accepted_new_rows) >= requested_count:
-                            break
-                        block, reason = _accept(raw)
-                        if block:
-                            accepted_new_rows.extend(block)
-                            new_entities += 1
-                        else:
-                            skipped[reason] = skipped.get(reason, 0) + 1
-                    for src in parsed.get("sources_consulted") or []:
-                        if src and src not in sources_consulted:
-                            sources_consulted.append(src)
+    def _launch(kind: str, payload: Any, task_prompt: str, schema: Dict[str, Any]) -> None:
+        fut = loop.run_in_executor(
+            executor,
+            _run_fetch_batch,
+            client,
+            agent_mode,
+            ctx["base_prompt"] + task_prompt,
+            schema,
+            ctx["tools_config"],
+        )
+        in_flight[fut] = (kind, payload)
 
-                    msg = f"Batch {batches_run}"
-                    if angle:
-                        msg += f" ({angle[:90]}{'…' if len(angle) > 90 else ''})"
-                    msg += f": {new_entities} new"
-                    if skipped:
-                        msg += " · skipped " + ", ".join(f"{n} {r}" for r, n in skipped.items())
-                    msg += f". Total {min(len(accepted_new_rows), requested_count)}/{requested_count}."
-                    agent_note = str(parsed.get("agent_summary") or "").strip()
+    try:
+        while True:
+            remaining = requested_count - len(rows)
+            if remaining <= 0:
+                stop_reason = "target_reached"
+                break
+            if should_stop():
+                stop_reason = "cancelled"
+                break
+            if loop.time() >= deadline:
+                stop_reason = "chunk_time"
+                break
+
+            filling = [c for kind, p in in_flight.values() if kind == "fill" for c in p]
+            discovering = sum(1 for kind, _ in in_flight.values() if kind == "discover")
+
+            # Fill queued candidates, assuming roughly 3 in 4 verify and pass the duplicate check.
+            while len(in_flight) < FETCH_CONCURRENCY and queue and len(filling) * 0.75 < remaining:
+                batch = queue[:FETCH_FILL_SIZE]
+                del queue[:FETCH_FILL_SIZE]
+                filling.extend(batch)
+                _launch("fill", batch, _fill_prompt(batch, main_col, ctx["source_names"]), ctx["row_schema"])
+
+            # Keep a buffer of candidates so fill calls never wait on discovery.
+            wants_candidates = len(queue) + len(filling) < remaining * 1.5 + FETCH_FILL_SIZE
+            if len(in_flight) < FETCH_CONCURRENCY and wants_candidates and discovering < (1 if queue else 2):
+                angle = await _next_discovery_angle()
+                if angle is not None:
+                    exclude = (
+                        [c["name"] for c in queue + filling]
+                        + _entity_values(rows[::-1] + existing_rows, main_col)
+                    )[:FETCH_EXCLUDE_LIST_LIMIT]
+                    _launch(
+                        "discover",
+                        angle,
+                        _discovery_prompt(FETCH_DISCOVERY_SIZE, angle, exclude, main_col, ctx["source_names"]),
+                        ctx["discovery_schema"],
+                    )
+
+            if not in_flight:
+                stop_reason = "exhausted"
+                break
+
+            # Wake up at least every few seconds to notice a stop request or the deadline.
+            done, _ = await asyncio.wait(
+                list(in_flight),
+                timeout=max(0.5, min(deadline - loop.time(), 5.0)),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for fut in done:
+                kind, payload = in_flight.pop(fut)
+                exc = fut.exception()
+                if exc is not None:
+                    state["error_calls"] += 1
+                    state["last_error"] = str(exc)[:120]
+                    if kind == "fill":
+                        queue[:0] = payload
+                    await report(f"A {'discovery' if kind == 'discover' else 'research'} call failed: {state['last_error']}")
+                    continue
+                state["error_calls"] = 0
+                parsed, state["model_used"] = fut.result()
+                state["calls"] += 1
+                for src in parsed.get("sources_consulted") or []:
+                    if src and src not in state["sources_consulted"]:
+                        state["sources_consulted"].append(src)
+                agent_note = str(parsed.get("agent_summary") or "").strip()
+
+                if kind == "discover":
+                    added = 0
+                    for cand in parsed.get("candidates") or []:
+                        if not isinstance(cand, dict):
+                            continue
+                        name = str(cand.get("name") or "").strip()
+                        source_url = str(cand.get("source_url") or "").strip()
+                        key = _normalize_entity_str(name)
+                        if not key or not source_url.startswith("http") or key in seen_keys:
+                            continue
+                        if dedup.is_duplicate({main_col: name}):
+                            continue
+                        seen_keys.add(key)
+                        state["seen_candidate_keys"].append(key)
+                        queue.append({"name": name, "source_url": source_url})
+                        added += 1
+                    msg = "Discovery"
+                    if payload:
+                        msg += f" ({payload[:90]}{'…' if len(payload) > 90 else ''})"
+                    msg += f": {added} new candidates queued, {len(queue)} waiting."
                     if agent_note:
                         msg += f" Agent: {agent_note[:220]}"
-                    await _report(msg)
+                    await report(msg)
+                    if state["phase"] == "direct":
+                        state["dry_discoveries"] = (
+                            state["dry_discoveries"] + 1 if added * 5 < FETCH_DISCOVERY_SIZE else 0
+                        )
+                        if state["dry_discoveries"] >= FETCH_MAX_DRY_DISCOVERIES:
+                            state["phase"] = "expand"
+                            await report("Discovery is running dry; switching to Main-column expansion.")
+                else:
+                    by_key = {_normalize_entity_str(c["name"]): c for c in payload}
+                    verified: List[str] = []
+                    skipped: Dict[str, int] = {}
+                    for raw in parsed.get("rows") or []:
+                        if len(rows) >= requested_count:
+                            break
+                        cand = _match_candidate(raw.get(main_col, ""), by_key) if isinstance(raw, dict) else None
+                        if cand is None:
+                            skipped["not requested"] = skipped.get("not requested", 0) + 1
+                            continue
+                        block, reason = _accept(raw, cand["source_url"])
+                        if block:
+                            rows.extend(block)
+                            verified.append(str(block[0].get(main_col, "")))
+                        else:
+                            skipped[reason] = skipped.get(reason, 0) + 1
+                    msg = f"Researched {len(payload)}: {', '.join(verified) if verified else 'none verified'}"
+                    if skipped:
+                        msg += " · skipped " + ", ".join(f"{n} {r}" for r, n in skipped.items())
+                    msg += f". Total {min(len(rows), requested_count)}/{requested_count}."
+                    await report(msg)
 
-                    if phase == "direct":
-                        # A batch is "dry" when under 20% of what it asked for turned out to be new.
-                        dry_batches = dry_batches + 1 if new_entities * 5 < size else 0
-                        if dry_batches >= FETCH_MAX_DRY_BATCHES:
-                            phase = "expand"
-                            await _report("The direct search is running dry; switching to Main-column expansion.")
+            if state["error_calls"] >= FETCH_MAX_ERROR_CALLS:
+                stop_reason = "api_error"
+                break
+    finally:
+        # Candidates still being researched go back on the queue so a later chunk retries them.
+        for fut, (kind, payload) in in_flight.items():
+            fut.cancel()
+            if kind == "fill":
+                queue[:0] = payload
+        executor.shutdown(wait=False, cancel_futures=True)
+    return stop_reason
 
-                if error_batches >= FETCH_MAX_ERROR_BATCHES:
-                    stop_reason = "api_error"
-                    break
-        finally:
-            for fut in in_flight:
-                fut.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
 
-    if not sources_consulted:
-        sources_consulted = list(mcp_names) if mcp_names else ["Web Search"]
+# ---------------------------------------------------------------------------
+# Background Fetch Jobs (Cloud Tasks chunks + completion email)
+# ---------------------------------------------------------------------------
 
-    # Sort final new rows according to Data Template sort rules
-    final_new_rows = apply_template_transforms(accepted_new_rows, columns)[:requested_count]
+_tasks_app: Optional[firebase_admin.App] = None
+_local_job_tasks: set["asyncio.Task[None]"] = set()
 
-    tsv_rows_only = rows_to_gsheets_tsv(final_new_rows, columns, include_headers=False)
-    tsv_with_headers = rows_to_gsheets_tsv(final_new_rows, columns, include_headers=True)
-    headers_list = [c.get("name", "") for c in columns if c.get("name")]
+
+def _enqueue_fetch_chunk_sync(job_id: str) -> None:
+    global _tasks_app
+    # Enqueue with the runtime's own credentials: the deployed function's service account can
+    # create Cloud Tasks, while the bundled Admin SDK key may not have that role.
+    if _tasks_app is None:
+        project_id = os.getenv("GCLOUD_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT") or firebase_admin.get_app().project_id
+        _tasks_app = firebase_admin.initialize_app(
+            credentials.ApplicationDefault(), {"projectId": project_id}, name="tasks"
+        )
+    queue = admin_functions.task_queue("locations/us-central1/functions/fetchjob", app=_tasks_app)
+    queue.enqueue({"job_id": job_id})
+
+
+async def _enqueue_fetch_chunk(job_id: str) -> None:
+    """Runs the next chunk of a fetch job in the background."""
+    if os.getenv("K_SERVICE"):
+        await asyncio.to_thread(_enqueue_fetch_chunk_sync, job_id)
+    else:
+        # Local dev (uvicorn): no Cloud Tasks, so run in this process.
+        task = asyncio.get_running_loop().create_task(run_fetch_job_chunk(job_id))
+        _local_job_tasks.add(task)
+        task.add_done_callback(_local_job_tasks.discard)
+
+
+def _claim_fetch_job(job_ref: Any) -> str:
+    """Takes the job's lease. Returns "claimed", "busy" (another chunk holds it), or "finished"."""
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def _claim(txn: Any) -> str:
+        snap = job_ref.get(transaction=txn)
+        if not snap.exists:
+            return "finished"
+        job = snap.to_dict()
+        if job.get("status") not in ("queued", "running"):
+            return "finished"
+        if float(job.get("lease_until") or 0) > time.time():
+            return "busy"
+        txn.update(job_ref, {
+            "status": "running",
+            "lease_until": time.time() + FETCH_LEASE_SEC,
+            "chunks": int(job.get("chunks") or 0) + 1,
+        })
+        return "claimed"
+
+    return _claim(transaction)
+
+
+def _send_fetch_email(to_addr: str, subject: str, body: str) -> str:
+    """Sends the completion email from the notification Gmail account. Returns a status note."""
+    sender = os.getenv("NOTIFY_EMAIL_FROM", "besabreak@gmail.com").strip()
+    password = os.getenv("NOTIFY_EMAIL_APP_PASSWORD", "").replace(" ", "")
+    if not to_addr:
+        return "not sent: the account has no email address"
+    if not password:
+        return "not sent: NOTIFY_EMAIL_APP_PASSWORD is not configured"
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"Data Retrieval System <{sender}>"
+    msg["To"] = to_addr
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+            smtp.login(sender, password)
+            smtp.send_message(msg)
+        return f"sent to {to_addr}"
+    except Exception as exc:
+        return f"not sent: {str(exc)[:150]}"
+
+
+async def _finalize_fetch_job(
+    job_ref: Any,
+    job: Dict[str, Any],
+    columns: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+    progress: Dict[str, Any],
+    stop_reason: str,
+    send_email: bool,
+) -> None:
+    state = job.get("state") or _new_fetch_state()
+    requested = int(job["requested"])
+    final_rows = apply_template_transforms(rows, columns)[:requested]
+    headers = [c.get("name", "") for c in columns if c.get("name")]
 
     summary_msg = (
-        f"Found {len(final_new_rows)} of {requested_count} requested rows, each backed by a source URL "
-        f"(0 duplicates against {len(all_existing_rows)} existing sheet rows; {batches_run} search batches). "
-        f"{_STOP_REASON_TEXT[stop_reason]}"
+        f"Found {len(final_rows)} of {requested} requested rows, each backed by a source URL "
+        f"(0 duplicates against existing sheet rows; {state.get('calls', 0)} AI calls). "
+        f"{_STOP_REASON_TEXT.get(stop_reason, '')}"
     )
-    if len(final_new_rows) < requested_count and stop_reason != "no_api_key":
+    if len(final_rows) < requested and stop_reason != "no_api_key":
         summary_msg += " No rows were invented to fill the gap."
-    if stop_reason == "api_error" and last_error:
-        summary_msg += f" Last error: {last_error}"
+    if stop_reason in ("api_error", "error") and state.get("last_error"):
+        summary_msg += f" Last error: {state['last_error']}"
 
-    return {
-        "rows": final_new_rows,
-        "headers": headers_list,
-        "tsv_rows_only": tsv_rows_only,
-        "tsv_with_headers": tsv_with_headers,
-        "deduplicated_against_count": len(all_existing_rows),
-        "requested_row_count": requested_count,
+    email_status = "not sent: stopped by request"
+    if send_email:
+        elapsed_min = max(1, round((time.time() - float(job.get("started_epoch") or time.time())) / 60))
+        app_url = os.getenv("APP_URL", "").strip()
+        body = (
+            f"Your data fetch for \"{job.get('project_name', 'your project')}\" has finished.\n\n"
+            f"{summary_msg}\n\nTook about {elapsed_min} minute{'s' if elapsed_min != 1 else ''}."
+            + (f"\n\nOpen the project: {app_url}" if app_url else "")
+        )
+        subject = (
+            f"Data fetch done: {len(final_rows)}/{requested} rows for {job.get('project_name', 'your project')}"
+        )
+        email_status = await asyncio.to_thread(_send_fetch_email, job.get("owner_email", ""), subject, body)
+
+    progress["status"] = "done"
+    progress["stop_reason"] = stop_reason
+    progress["found"] = len(final_rows)
+    progress["email_status"] = email_status
+    progress["log"] = (
+        progress.get("log", [])
+        + [{"t": round(time.time() - float(job.get("started_epoch") or time.time()), 1), "msg": summary_msg}]
+    )[-40:]
+    progress["updated_at"] = _now_iso()
+
+    agent_run_meta = {
+        "timestamp": _now_iso(),
+        "model_used": state.get("model_used") or job.get("agent_mode", ""),
         "agent_summary": summary_msg,
-        "sources_consulted": sources_consulted,
-        "model_used": model_used,
-        "live_ai": len(final_new_rows) > 0,
+        "sources_consulted": state.get("sources_consulted") or ["Web Search"],
+        "rows_returned": len(final_rows),
+        "requested_row_count": requested,
+        "deduplicated_against_count": int(job.get("existing_row_count") or 0),
+        "target_tab_name": job.get("tab_name", ""),
+        "live_ai": len(final_rows) > 0,
         "stop_reason": stop_reason,
-        "batches_run": batches_run,
+        "batches_run": int(state.get("calls") or 0),
+        "email_status": email_status,
     }
+
+    proj_ref = db.collection("projects").document(job["project_id"])
+    project = (await asyncio.to_thread(proj_ref.get)).to_dict() or {}
+    updates: Dict[str, Any] = {
+        "new_rows": final_rows,
+        "new_headers": headers,
+        "last_agent_run": agent_run_meta,
+        "fetch_progress": progress,
+        "last_edited": _now_iso(),
+    }
+    tabs = project.get("tabs", [])
+    for t in tabs:
+        if t.get("id") == job.get("tab_id"):
+            if not t.get("headers"):
+                t["headers"] = headers
+            if job.get("append_rows"):
+                t["rows"] = list(t.get("rows", [])) + final_rows
+            updates["tabs"] = tabs
+            break
+    await asyncio.to_thread(proj_ref.update, updates)
+    await asyncio.to_thread(job_ref.update, {
+        "status": "done",
+        "stop_reason": stop_reason,
+        "email_status": email_status,
+        "finished_at": _now_iso(),
+        "lease_until": 0,
+        "gemini_api_key": firestore.DELETE_FIELD,
+    })
+
+
+async def run_fetch_job_chunk(job_id: str) -> None:
+    """
+    Runs one chunk (up to FETCH_CHUNK_SEC) of a background fetch job, saving progress as it goes.
+    Queues the next chunk if there is more to do; otherwise finalizes the job and sends the email.
+    Raises RuntimeError when another chunk holds the lease, so Cloud Tasks retries later.
+    """
+    load_dotenv(BASE_DIR / ".env", override=True)
+    load_dotenv(BASE_DIR / ".env.example", override=False)
+
+    job_ref = db.collection(FETCH_JOBS_COLLECTION).document(job_id)
+    claim = await asyncio.to_thread(_claim_fetch_job, job_ref)
+    if claim == "finished":
+        return
+    if claim == "busy":
+        raise RuntimeError(f"Fetch job {job_id} is already running in another chunk")
+
+    job = (await asyncio.to_thread(job_ref.get)).to_dict()
+    proj_ref = db.collection("projects").document(job["project_id"])
+    project = (await asyncio.to_thread(proj_ref.get)).to_dict() or {}
+    progress: Dict[str, Any] = dict(project.get("fetch_progress") or {})
+    if progress.get("run_id") != job_id:
+        # A newer fetch or a clear replaced this one.
+        await asyncio.to_thread(job_ref.update, {
+            "status": "superseded", "lease_until": 0, "gemini_api_key": firestore.DELETE_FIELD,
+        })
+        return
+
+    started_epoch = float(job["started_epoch"])
+    requested = int(job["requested"])
+    rows: List[Dict[str, Any]] = list(project.get("new_rows") or [])
+    state: Dict[str, Any] = {**_new_fetch_state(), **(job.get("state") or {})}
+    job["state"] = state
+    columns: List[Dict[str, Any]] = project.get("columns", [])
+    cancel_requested = bool(job.get("cancel_requested"))
+    dirty = asyncio.Event()
+
+    async def _report(message: str) -> None:
+        progress["found"] = min(len(rows), requested)
+        progress["log"] = (
+            progress.get("log", []) + [{"t": round(time.time() - started_epoch, 1), "msg": message}]
+        )[-40:]
+        dirty.set()
+
+    async def _flush() -> None:
+        nonlocal cancel_requested
+        dirty.clear()
+        progress["updated_at"] = _now_iso()
+        await asyncio.to_thread(
+            proj_ref.update, {"fetch_progress": copy.deepcopy(progress), "new_rows": list(rows[:requested])}
+        )
+        await asyncio.to_thread(
+            job_ref.update, {"state": copy.deepcopy(state), "lease_until": time.time() + FETCH_LEASE_SEC}
+        )
+        snap = (await asyncio.to_thread(job_ref.get)).to_dict() or {}
+        cancel_requested = cancel_requested or bool(snap.get("cancel_requested"))
+
+    async def _flusher() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(dirty.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                pass  # Still renew the lease and check for a stop request during long calls.
+            await _flush()
+            await asyncio.sleep(1.5)
+
+    stop_reason = "error"
+    flusher = asyncio.create_task(_flusher())
+    try:
+        api_key = (job.get("gemini_api_key") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+        tabs = project.get("tabs", [])
+        target_tab = next(
+            (t for t in tabs if t.get("id") == job.get("tab_id")),
+            tabs[0] if tabs else {"id": job.get("tab_id"), "name": "Tab 1", "rows": []},
+        )
+        ctx = await _prepare_fetch_context(project, target_tab, job.get("query_prompt", ""), job.get("prior_new_rows") or [])
+        columns = ctx["columns"]
+        if int(job.get("chunks") or 0) <= 1:
+            await _report(
+                f"Searching for {requested} rows with {job.get('agent_mode')}: discovery finds up to "
+                f"{FETCH_DISCOVERY_SIZE} candidates per call, then up to {FETCH_CONCURRENCY} calls research "
+                f"{FETCH_FILL_SIZE} candidates each."
+            )
+        else:
+            await _report(f"Resuming in background run #{job.get('chunks')}.")
+
+        if not api_key:
+            stop_reason = "no_api_key"
+        else:
+            remaining_job_sec = started_epoch + FETCH_JOB_MAX_SEC - time.time()
+            loop = asyncio.get_running_loop()
+            stop_reason = await run_fetch_pipeline(
+                ctx=ctx,
+                state=state,
+                rows=rows,
+                requested_count=requested,
+                agent_mode=job.get("agent_mode", "gemini-3.8-flash"),
+                api_key=api_key,
+                deadline=loop.time() + max(0.0, min(FETCH_CHUNK_SEC, remaining_job_sec)),
+                report=_report,
+                should_stop=lambda: cancel_requested,
+            )
+    except Exception as exc:
+        state["last_error"] = str(exc)[:200]
+        await _report(f"Fetch failed: {state['last_error']}")
+    finally:
+        flusher.cancel()
+
+    if stop_reason == "chunk_time" and time.time() < started_epoch + FETCH_JOB_MAX_SEC - 5:
+        await _report("Continuing in a new background run.")
+        await _flush()
+        await asyncio.to_thread(job_ref.update, {"lease_until": 0})
+        try:
+            await _enqueue_fetch_chunk(job_id)
+            return
+        except Exception as exc:
+            state["last_error"] = f"Could not queue the next background run: {str(exc)[:150]}"
+            stop_reason = "error"
+    if stop_reason == "chunk_time":
+        stop_reason = "time_limit"
+
+    await _flush()
+    await _finalize_fetch_job(
+        job_ref, job, columns, rows, progress, stop_reason, send_email=stop_reason != "cancelled",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2518,113 +2936,116 @@ async def fetch_data_with_agent(
         tabs[0] if tabs else {"id": target_tab_id, "name": "Tab 1", "rows": []},
     )
 
-    requested_lines = max(1, min(int(payload.row_count), 1000))
+    if (project.get("fetch_progress") or {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="A fetch is already running for this project. Stop it first.")
 
-    # A new request replaces the previous new data right away; rows found are saved as they arrive
-    # so the client can show them live and a timeout never loses what was already found.
+    requested_lines = max(1, min(int(payload.row_count), 1000))
+    job_id = payload.run_id or uuid.uuid4().hex[:12]
+    started_epoch = time.time()
+    prior_new_rows = project.get("new_rows") or []
+    existing_row_count = len(prior_new_rows) + sum(
+        len(t.get("rows", [])) for t in tabs if not t.get("name", "").strip().upper().startswith("RULE")
+    )
+
+    # The fetch runs as a background job; the client polls /fetch-progress and the owner is emailed
+    # when it finishes. A new request replaces the previous new data right away.
+    job: Dict[str, Any] = {
+        "project_id": project_id,
+        "project_name": project.get("name", ""),
+        "owner_uid": user["uid"],
+        "owner_email": user.get("email", ""),
+        "tab_id": target_tab.get("id"),
+        "tab_name": target_tab.get("name", "Tab 1"),
+        "query_prompt": payload.query_prompt or "",
+        "requested": requested_lines,
+        "agent_mode": payload.agent_mode,
+        "append_rows": payload.append_rows,
+        # Previous results stay excluded so a new fetch finds different records.
+        "prior_new_rows": prior_new_rows,
+        "existing_row_count": existing_row_count,
+        "state": _new_fetch_state(),
+        "status": "queued",
+        "lease_until": 0,
+        "chunks": 0,
+        "cancel_requested": False,
+        "started_epoch": started_epoch,
+        "created_at": _now_iso(),
+    }
+    if payload.gemini_api_key:
+        # Needed by the background run; deleted from the job when it finishes.
+        job["gemini_api_key"] = payload.gemini_api_key
     progress: Dict[str, Any] = {
-        "run_id": payload.run_id or uuid.uuid4().hex[:12],
+        "run_id": job_id,
         "status": "running",
         "requested": requested_lines,
         "found": 0,
-        "log": [],
+        "log": [{"t": 0, "msg": "Queued to run in the background."}],
+        "notify_email": user.get("email", ""),
         "started_at": _now_iso(),
         "updated_at": _now_iso(),
     }
-    started = time.monotonic()
-    live_rows: List[Dict[str, Any]] = []
-    dirty = asyncio.Event()
 
-    async def _flush() -> None:
-        dirty.clear()
-        progress["updated_at"] = _now_iso()
-        await asyncio.to_thread(
-            doc_ref.update, {"fetch_progress": dict(progress), "new_rows": list(live_rows)}
-        )
-
-    async def _on_progress(message: str, rows_so_far: List[Dict[str, Any]]) -> None:
-        live_rows[:] = rows_so_far[:requested_lines]
-        progress["found"] = len(live_rows)
-        progress["log"] = (progress["log"] + [{"t": round(time.monotonic() - started, 1), "msg": message}])[-40:]
-        dirty.set()
-
-    async def _flusher() -> None:
-        while True:
-            await dirty.wait()
-            await _flush()
-            await asyncio.sleep(1.5)
-
+    job_ref = db.collection(FETCH_JOBS_COLLECTION).document(job_id)
+    await asyncio.to_thread(job_ref.set, job)
     await asyncio.to_thread(doc_ref.update, {
-        "new_rows": [],
-        "last_agent_run": None,
-        "fetch_progress": dict(progress),
-    })
-    flusher = asyncio.create_task(_flusher())
-    try:
-        result = await run_agentic_scraper(
-            project=project,
-            target_tab=target_tab,
-            query_prompt=payload.query_prompt or "",
-            row_count=requested_lines,
-            agent_mode=payload.agent_mode,
-            override_api_key=payload.gemini_api_key,
-            on_progress=_on_progress,
-        )
-    except Exception as exc:
-        flusher.cancel()
-        progress["status"] = "error"
-        await _on_progress(f"Fetch failed: {str(exc)[:200]}", live_rows)
-        await _flush()
-        raise
-    flusher.cancel()
-    progress["status"] = "done"
-    progress["stop_reason"] = result.get("stop_reason", "")
-    await _on_progress(result["agent_summary"], result["rows"])
-
-    new_rows = result["rows"]
-    new_headers = result.get("headers") or [c.get("name", "") for c in project.get("columns", []) if c.get("name")]
-
-    for t in tabs:
-        if t.get("id") == target_tab.get("id"):
-            if not t.get("headers"):
-                t["headers"] = new_headers
-            # Only append to existing tab rows if explicitly requested; otherwise keep Existing Data untouched
-            # and output ONLY the newly produced data in `new_rows`.
-            if payload.append_rows:
-                t["rows"] = list(t.get("rows", [])) + new_rows
-            break
-
-    agent_run_meta = {
-        "timestamp": _now_iso(),
-        "model_used": result["model_used"],
-        "agent_summary": result["agent_summary"],
-        "sources_consulted": result["sources_consulted"],
-        "rows_returned": len(new_rows),
-        "requested_row_count": requested_lines,
-        "deduplicated_against_count": result.get("deduplicated_against_count", 0),
-        "target_tab_name": target_tab.get("name", "Tab 1"),
-        "live_ai": result["live_ai"],
-        "stop_reason": result.get("stop_reason", ""),
-        "batches_run": result.get("batches_run", 0),
-    }
-
-    updates = {
         "tabs": tabs,
         "columns": project.get("columns", []),
         "existing_data_type": project.get("existing_data_type", "none"),
         "active_tab_id": target_tab.get("id"),
-        "new_rows": new_rows,
-        "new_headers": new_headers,
-        "last_edited": _now_iso(),
-        "last_agent_run": agent_run_meta,
+        "new_rows": [],
+        "last_agent_run": None,
         "fetch_progress": progress,
-    }
-    doc_ref.update(updates)
+        "last_edited": _now_iso(),
+    })
+    try:
+        await _enqueue_fetch_chunk(job_id)
+    except Exception as exc:
+        detail = f"Could not start the background fetch: {str(exc)[:200]}"
+        progress["status"] = "error"
+        progress["log"].append({"t": 0, "msg": detail})
+        await asyncio.to_thread(job_ref.update, {"status": "error", "gemini_api_key": firestore.DELETE_FIELD})
+        await asyncio.to_thread(doc_ref.update, {"fetch_progress": progress})
+        raise HTTPException(status_code=500, detail=detail)
 
     updated = doc_ref.get().to_dict()
     updated["id"] = project_id
-    updated["tsv_rows_only"] = result.get("tsv_rows_only", "")
-    updated["tsv_with_headers"] = result.get("tsv_with_headers", "")
+    return updated
+
+
+@app.post("/api/projects/{project_id}/fetch-cancel")
+async def cancel_fetch(
+    project_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Asks the running fetch to stop; it keeps the rows found so far."""
+    doc_ref = db.collection("projects").document(project_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project = doc.to_dict()
+    if project.get("owner_uid") != user["uid"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    progress = dict(project.get("fetch_progress") or {})
+    if progress.get("status") == "running" and progress.get("run_id"):
+        job_ref = db.collection(FETCH_JOBS_COLLECTION).document(progress["run_id"])
+        job_snap = job_ref.get()
+        if job_snap.exists:
+            await asyncio.to_thread(job_ref.update, {"cancel_requested": True})
+            job = job_snap.to_dict()
+            if float(job.get("lease_until") or 0) < time.time():
+                # No chunk is running to notice the request (queued or stalled), so stop it here.
+                await _finalize_fetch_job(
+                    job_ref, job, project.get("columns", []), project.get("new_rows") or [],
+                    progress, "cancelled", send_email=False,
+                )
+        else:
+            progress["status"] = "done"
+            progress["stop_reason"] = "cancelled"
+            await asyncio.to_thread(doc_ref.update, {"fetch_progress": progress})
+
+    updated = doc_ref.get().to_dict()
+    updated["id"] = project_id
     return updated
 
 
@@ -2660,6 +3081,8 @@ async def clear_new_data(
         raise HTTPException(status_code=404, detail="Project not found")
     if doc.to_dict().get("owner_uid") != user["uid"]:
         raise HTTPException(status_code=403, detail="Not authorized")
+    if (doc.to_dict().get("fetch_progress") or {}).get("status") == "running":
+        raise HTTPException(status_code=409, detail="A fetch is still running. Stop it before clearing.")
     doc_ref.update({
         "new_rows": [],
         "new_headers": [],

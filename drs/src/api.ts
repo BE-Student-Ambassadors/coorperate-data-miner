@@ -50,8 +50,16 @@ export interface AgentRunMeta {
   deduplicated_against_count?: number
   target_tab_name?: string
   live_ai: boolean
-  stop_reason?: 'target_reached' | 'exhausted' | 'time_budget' | 'api_error' | 'no_api_key'
+  stop_reason?:
+    | 'target_reached'
+    | 'exhausted'
+    | 'time_limit'
+    | 'cancelled'
+    | 'api_error'
+    | 'no_api_key'
+    | 'error'
   batches_run?: number
+  email_status?: string
 }
 
 export interface FetchProgress {
@@ -63,6 +71,8 @@ export interface FetchProgress {
   started_at: string
   updated_at: string
   stop_reason?: AgentRunMeta['stop_reason']
+  notify_email?: string
+  email_status?: string
 }
 
 export interface GSheetSyncMeta {
@@ -312,6 +322,29 @@ export async function runFetchDataAgent(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || 'Failed to run AI agent data fetch')
+  }
+  return res.json()
+}
+
+export async function getProject(projectId: string): Promise<Project> {
+  const headers = await getAuthHeaders(false)
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}`, { headers })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to load project')
+  }
+  return res.json()
+}
+
+export async function cancelFetch(projectId: string): Promise<Project> {
+  const headers = await getAuthHeaders(false)
+  const res = await fetch(`${getApiBase()}/api/projects/${projectId}/fetch-cancel`, {
+    method: 'POST',
+    headers,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to stop the fetch')
   }
   return res.json()
 }

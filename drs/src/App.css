@@ -1217,6 +1217,37 @@
   border-color: #fca5a5;
 }
 
+.dm-fetch-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dm-stop-fetch-btn {
+  flex-shrink: 0;
+  padding: 3px 12px;
+  background: #ffffff;
+  border: 1px solid #fca5a5;
+  color: #7f1d1d;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.dm-stop-fetch-btn:hover:not(:disabled) {
+  background: #fef2f2;
+}
+
+.dm-stop-fetch-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.dm-fetch-note {
+  margin-top: 4px;
+  font-size: 0.8rem;
+}
+
 .dm-fetch-log {
   margin: 8px 0 0;
   padding: 0;
