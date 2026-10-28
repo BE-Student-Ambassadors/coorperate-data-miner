@@ -7,5 +7,6 @@ drs/dist/
 drs/.env
 drs/.env.local
 .vercel/
+.firebase/
 .DS_Store
 */.env
