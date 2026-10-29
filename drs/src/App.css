@@ -1451,3 +1451,12 @@
   margin-top: 14px;
 }
 
+.dm-mcp-unconnected {
+  background: #f59e0b;
+}
+
+.dm-mcp-note {
+  margin: 8px 0 0;
+  color: #92400e;
+  font-size: 0.8rem;
+}

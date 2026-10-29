@@ -9,6 +9,7 @@ import os
 import re
 import smtplib
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ import firebase_admin
 import gspread
 import httpx
 import openpyxl
+import pypdf
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -1774,8 +1776,14 @@ async def _prepare_fetch_context(
     profiles = learn_sheet_format_profile(effective_tab, all_tabs, columns)
 
     mcps: List[Dict[str, Any]] = project.get("mcps", [])
-    enabled_mcps = [m for m in mcps if m.get("enabled", True)]
+    # Only connectors with a server URL are attached as tools; the rest give the model no access.
+    enabled_mcps = [
+        m for m in mcps if m.get("enabled", True) and (m.get("server_url") or "").strip().startswith("http")
+    ]
     mcp_names = [m.get("name", "") for m in enabled_mcps]
+    unavailable_sources = [
+        m.get("name", "") for m in mcps if m.get("enabled", True) and m not in enabled_mcps and m.get("name")
+    ]
 
     existing_source = project.get("existing_data_source", "")
     tab_existing_rows = effective_tab.get("rows", [])
@@ -1879,7 +1887,9 @@ async def _prepare_fetch_context(
 Project Name: "{project.get('name', 'Data Mining Project')}"
 Target Google Sheet Tab: "{effective_tab.get('name', 'Tab 1')}"
 User Scraping Goal / Prompt: "{query_prompt or f'Find real records for {project.get("name", "this project")} ({effective_tab.get("name", "Tab 1")}) matching the exact Google Sheet format.'}"
-Active MCP / Source Connectors prioritized: {', '.join(mcp_names) if mcp_names else 'General Web Search'}
+Connected data sources: {', '.join(mcp_names) if mcp_names else 'none (public web search only)'}
+{f"NOT accessible to you: {', '.join(unavailable_sources)}. These sites require login and no connector is configured, so you cannot read them. Never cite them or say data came from them, even where a column rule mentions them; use public pages only." if unavailable_sources else ""}
+Every record you return is automatically checked against the text of the page you cite. Anything that page does not actually say is discarded, so only report what you read on a real page.
 
 Existing Sample Rows Seen in Google Sheet "{effective_tab.get('name', 'Tab 1')}" (MATCH THIS EXACT COLUMN FORMAT, STYLE, AND VALUE CONVENTIONS):
 {json.dumps(sample_existing_rows[:6], indent=2)}
@@ -1917,6 +1927,234 @@ Data Template Columns & Learned Google Sheet Formatting Rules:
         "tools_config": tools_config,
         "headers": [c.get("name", "") for c in columns if c.get("name")],
     }
+
+
+# ---------------------------------------------------------------------------
+# Source Verification (server-side check of every model claim against the cited pages)
+# ---------------------------------------------------------------------------
+
+# Model-cited URLs cannot be trusted (they are sometimes invented), so every row is checked against the
+# actual text of the pages it cites: the Main value must appear on a page, and factual cells must
+# appear near it there. Unsupported factual cells are blanked; rows whose pages don't mention the
+# Main value are dropped.
+VERIFY_MAX_PAGE_BYTES = 5_000_000
+VERIFY_WINDOW_CHARS = 1500
+_VERIFY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_LEGAL_SUFFIXES = {"inc", "llc", "ltd", "corp", "corporation", "co", "company", "plc", "gmbh", "limited"}
+_ENTITY_COL_KEYWORDS = ("COMPANY", "EMPLOYER", "ORGANIZATION", "ORGANISATION", "SCHOOL", "UNIVERSITY", "COLLEGE")
+_TITLE_COL_KEYWORDS = (
+    "POSITION", "TITLE", "ROLE", "OCCUPATION", "MAJOR", "AREA OF STUDY", "FIELD OF STUDY", "DEGREE", "CONCENTRATION",
+)
+_NUMERIC_COL_KEYWORDS = ("YEAR", "SALARY", "COMPENSATION", "PAY", "WAGE")
+
+
+def _verify_norm(text: Any) -> str:
+    """Lowercase ASCII words separated by single spaces, padded so ` word ` lookups are whole-word."""
+    ascii_text = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().lower()
+    return " " + " ".join(_VERIFY_TOKEN_RE.findall(ascii_text)) + " "
+
+
+def _claim_kind(col: Dict[str, Any], main_col_name: str) -> Optional[str]:
+    """How a column's values are checked: "entity", "title", "numeric", or None (derived, not checked)."""
+    name = col.get("name", "")
+    up = name.strip().upper()
+    if name == main_col_name or any(k in up for k in _ENTITY_COL_KEYWORDS):
+        return "entity"
+    if "JOB TYPE" not in up and (any(k in up for k in _TITLE_COL_KEYWORDS) or up in ("JOB", "JOB TITLE")):
+        return "title"
+    if col.get("data_type") in ("Number", "Date") or any(k in up for k in _NUMERIC_COL_KEYWORDS):
+        return "numeric"
+    if "copy" in (col.get("special_instructions") or "").lower():
+        return "title"
+    return None
+
+
+def _name_positions(text: str, name: Any) -> List[int]:
+    """Offsets in normalized `text` where `name` occurs (first and last word within a few words)."""
+    tokens = _verify_norm(name).split()
+    if not tokens:
+        return []
+    first, last = f" {tokens[0]} ", f" {tokens[-1]} "
+    positions: List[int] = []
+    start = text.find(first)
+    while start != -1:
+        if len(tokens) == 1:
+            positions.append(start)
+        else:
+            # "First Last", "First M. Last", or "Last, First"
+            window = text[max(0, start - 40): start + 60 + len(" ".join(tokens))]
+            if last in window:
+                positions.append(start)
+        start = text.find(first, start + 1)
+    return positions
+
+
+def _entity_variants(value: str) -> List[str]:
+    """Normalized forms of an entity value: "Meta Platforms (via QualityAI)" -> meta platforms, qualityai."""
+    parts = re.split(r"\(|\)|\bvia\b|/|,| @ | - | – | — ", value, flags=re.IGNORECASE)
+    variants: List[str] = []
+    for part in [value] + parts:
+        words = [w for w in _verify_norm(part).split() if w not in _LEGAL_SUFFIXES]
+        if words and len(" ".join(words)) >= 2:
+            variants.append(" " + " ".join(words) + " ")
+    return variants
+
+
+def _normalize_link(url: str) -> str:
+    return re.sub(r"^https?://(www\.)?", "", url.strip().lower()).split("?")[0].split("#")[0].rstrip("/")
+
+
+def _stem(word: str) -> str:
+    for suffix in ("ing", "ers", "er", "s"):
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _claim_supported(value: str, kind: str, windows: List[str]) -> bool:
+    if kind == "entity":
+        variants = _entity_variants(value)
+        return any(v in w for w in windows for v in variants)
+    if kind == "numeric":
+        numbers = re.findall(r"\d+", value.replace(",", ""))
+        return bool(numbers) and any(all(f" {n} " in w for n in numbers) for w in windows)
+    # Titles may be worded slightly differently ("Software Engineer" vs "Software Engineering"):
+    # require two thirds of the meaningful words, by stem.
+    words = {_stem(w) for w in _verify_norm(value).split() if len(w) > 2 and w not in ("and", "the", "for", "with")}
+    if not words:
+        return any(_verify_norm(value) in w for w in windows)
+    for w in windows:
+        present = {_stem(t) for t in w.split()}
+        if len(words & present) * 3 >= len(words) * 2:
+            return True
+    return False
+
+
+class SourceVerifier:
+    """Fetches cited pages (HTML or PDF) once per run and checks claims against their text."""
+
+    def __init__(self, transport: Optional[httpx.AsyncBaseTransport] = None) -> None:
+        # url -> (normalized text, normalized hrefs linked from the page)
+        self._cache: Dict[str, Tuple[str, set[str]]] = {}
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._sem = asyncio.Semaphore(8)
+        self._client = httpx.AsyncClient(
+            transport=transport,
+            timeout=15.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                )
+            },
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def _page(self, url: str) -> Tuple[str, set[str]]:
+        if not url.startswith("http"):
+            return "", set()
+        lock = self._locks.setdefault(url, asyncio.Lock())
+        async with lock:
+            if url not in self._cache:
+                self._cache[url] = await self._fetch(url)
+        return self._cache[url]
+
+    async def page_text(self, url: str) -> str:
+        """Normalized page text, or "" when the page can't be fetched or read."""
+        return (await self._page(url))[0]
+
+    async def _fetch(self, url: str) -> Tuple[str, set[str]]:
+        try:
+            async with self._sem:
+                resp = await self._client.get(url)
+            if resp.status_code != 200 or len(resp.content) > VERIFY_MAX_PAGE_BYTES:
+                return "", set()
+            content_type = resp.headers.get("content-type", "").lower()
+            if "pdf" in content_type or resp.content[:5] == b"%PDF-":
+                reader = pypdf.PdfReader(io.BytesIO(resp.content))
+                return _verify_norm(" ".join((p.extract_text() or "") for p in reader.pages[:20])), set()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            hrefs = {_normalize_link(a["href"]) for a in soup.find_all("a", href=True)}
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            return _verify_norm(soup.get_text(" ")), hrefs
+        except Exception:
+            return "", set()
+
+    async def names_on_page(self, url: str, names: List[str]) -> set[str]:
+        """The subset of `names` that appear on the page."""
+        text = await self.page_text(url)
+        return {n for n in names if text and _name_positions(text, n)}
+
+    async def verify_row(
+        self,
+        raw: Dict[str, Any],
+        main_value: str,
+        urls: List[str],
+        columns: List[Dict[str, Any]],
+        main_col_name: str,
+    ) -> Tuple[Optional[Dict[str, Any]], str, int]:
+        """
+        Returns (row with unsupported factual cells blanked, "", blanked count), or
+        (None, reason, 0) when no cited page mentions `main_value`.
+        """
+        seen: set[str] = set()
+        windows: List[str] = []
+        evidence_url = ""
+        evidence_hrefs: set[str] = set()
+        for url in urls:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            text, hrefs = await self._page(url)
+            positions = _name_positions(text, main_value) if text else []
+            if positions:
+                evidence_url = evidence_url or url
+                evidence_hrefs |= hrefs
+                windows.extend(
+                    text[max(0, p - VERIFY_WINDOW_CHARS): p + VERIFY_WINDOW_CHARS] for p in positions[:20]
+                )
+        if not windows:
+            return None, "not on cited page", 0
+
+        checked = dict(raw)
+        blanked = 0
+        claimed_any = False
+        verified_any = False
+        for col in columns:
+            c_name = col.get("name", "")
+            kind = _claim_kind(col, main_col_name)
+            if not c_name or c_name == main_col_name or kind is None:
+                continue
+            cell = str(checked.get(c_name, "") or "").strip()
+            if not cell:
+                continue
+            lines = [ln for ln in cell.split("\n") if ln.strip()]
+            kept = [ln for ln in lines if _claim_supported(ln.strip().lstrip("•-*").strip(), kind, windows)]
+            blanked += len(lines) - len(kept)
+            checked[c_name] = "\n".join(kept)
+            claimed_any = True
+            verified_any = verified_any or bool(kept)
+        # A row whose every factual claim was unsupported is just a name plus guesses.
+        if claimed_any and not verified_any:
+            return None, "nothing verifiable on cited page", 0
+        checked["_source_url"] = evidence_url
+        # Keep a profile link only if it opens, or a page that mentions this entity links to it
+        # (LinkedIn blocks automated fetches, but portfolios and directories often link to profiles).
+        links = checked.get("_links")
+        if isinstance(links, dict):
+            kept_links: Dict[str, str] = {}
+            for col_name, url in links.items():
+                url = str(url or "").strip()
+                if url.startswith("http") and (
+                    _normalize_link(url) in evidence_hrefs or await self.page_text(url)
+                ):
+                    kept_links[col_name] = url
+            checked["_links"] = kept_links
+        return checked, "", blanked
 
 
 def _new_fetch_state() -> Dict[str, Any]:
@@ -2015,6 +2253,7 @@ async def run_fetch_pipeline(
         return state["expansion_angles"].pop(0) if state["expansion_angles"] else None
 
     client = genai.Client(api_key=api_key)
+    verifier = SourceVerifier()
     loop = asyncio.get_running_loop()
     # A dedicated executor so calls still running when we stop never hold up the response
     # (asyncio.run waits on the default executor at shutdown).
@@ -2103,25 +2342,40 @@ async def run_fetch_pipeline(
                 agent_note = str(parsed.get("agent_summary") or "").strip()
 
                 if kind == "discover":
-                    added = 0
+                    fresh: Dict[str, List[Dict[str, str]]] = {}
+                    batch_keys: set[str] = set()
                     for cand in parsed.get("candidates") or []:
                         if not isinstance(cand, dict):
                             continue
                         name = str(cand.get("name") or "").strip()
                         source_url = str(cand.get("source_url") or "").strip()
                         key = _normalize_entity_str(name)
-                        if not key or not source_url.startswith("http") or key in seen_keys:
+                        if not key or not source_url.startswith("http") or key in seen_keys or key in batch_keys:
                             continue
                         if dedup.is_duplicate({main_col: name}):
                             continue
-                        seen_keys.add(key)
-                        state["seen_candidate_keys"].append(key)
-                        queue.append({"name": name, "source_url": source_url})
-                        added += 1
+                        batch_keys.add(key)
+                        fresh.setdefault(source_url, []).append({"name": name, "source_url": source_url})
+                    # Only queue candidates that really appear on the page they were "found" on.
+                    added = 0
+                    not_on_page = 0
+                    for source_url, cands in fresh.items():
+                        present = await verifier.names_on_page(source_url, [c["name"] for c in cands])
+                        for cand in cands:
+                            key = _normalize_entity_str(cand["name"])
+                            seen_keys.add(key)
+                            state["seen_candidate_keys"].append(key)
+                            if cand["name"] in present:
+                                queue.append(cand)
+                                added += 1
+                            else:
+                                not_on_page += 1
                     msg = "Discovery"
                     if payload:
                         msg += f" ({payload[:90]}{'…' if len(payload) > 90 else ''})"
                     msg += f": {added} new candidates queued, {len(queue)} waiting."
+                    if not_on_page:
+                        msg += f" Dropped {not_on_page} not found on their cited page."
                     if agent_note:
                         msg += f" Agent: {agent_note[:220]}"
                     await report(msg)
@@ -2136,6 +2390,7 @@ async def run_fetch_pipeline(
                     by_key = {_normalize_entity_str(c["name"]): c for c in payload}
                     verified: List[str] = []
                     skipped: Dict[str, int] = {}
+                    values_removed = 0
                     for raw in parsed.get("rows") or []:
                         if len(rows) >= requested_count:
                             break
@@ -2143,7 +2398,19 @@ async def run_fetch_pipeline(
                         if cand is None:
                             skipped["not requested"] = skipped.get("not requested", 0) + 1
                             continue
-                        block, reason = _accept(raw, cand["source_url"])
+                        # Check every factual cell against the cited pages; blank what they don't say.
+                        checked, reason, removed = await verifier.verify_row(
+                            raw,
+                            str(raw.get(main_col, "") or cand["name"]),
+                            [str(raw.get("_source_url") or "").strip(), cand["source_url"]],
+                            columns,
+                            main_col,
+                        )
+                        if checked is None:
+                            skipped[reason] = skipped.get(reason, 0) + 1
+                            continue
+                        values_removed += removed
+                        block, reason = _accept(checked, cand["source_url"])
                         if block:
                             rows.extend(block)
                             verified.append(str(block[0].get(main_col, "")))
@@ -2152,6 +2419,8 @@ async def run_fetch_pipeline(
                     msg = f"Researched {len(payload)}: {', '.join(verified) if verified else 'none verified'}"
                     if skipped:
                         msg += " · skipped " + ", ".join(f"{n} {r}" for r, n in skipped.items())
+                    if values_removed:
+                        msg += f" · blanked {values_removed} value{'s' if values_removed != 1 else ''} their source didn't support"
                     msg += f". Total {min(len(rows), requested_count)}/{requested_count}."
                     await report(msg)
 
@@ -2165,6 +2434,7 @@ async def run_fetch_pipeline(
             if kind == "fill":
                 queue[:0] = payload
         executor.shutdown(wait=False, cancel_futures=True)
+        await verifier.aclose()
     return stop_reason
 
 

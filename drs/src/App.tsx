@@ -50,6 +50,11 @@ import './App.css'
 
 const PAGE_SIZE = 100
 
+// Connectors are only attached as AI tools when they have a server URL.
+function isMcpConnected(mcp: MCPConnector): boolean {
+  return (mcp.server_url ?? '').trim().startsWith('http')
+}
+
 function formatElapsed(seconds: number): string {
   const total = Math.max(0, Math.round(seconds))
   if (total < 60) return `${total}s`
@@ -2824,12 +2829,21 @@ export function App() {
                       mcp.enabled ? 'active-mcp' : 'disabled-mcp'
                     }`}
                     title={`${mcp.name} MCP Connector (${
-                      mcp.enabled ? 'Active' : 'Click to enable'
+                      !isMcpConnected(mcp)
+                        ? 'Not connected: no server URL, so the AI cannot read it'
+                        : mcp.enabled
+                        ? 'Active'
+                        : 'Click to enable'
                     })`}
                     onClick={() => handleToggleMcp(mcp.id)}
                   >
                     <span>in</span>
-                    {mcp.enabled && <span className="dm-mcp-check">✓</span>}
+                    {mcp.enabled &&
+                      (isMcpConnected(mcp) ? (
+                        <span className="dm-mcp-check">✓</span>
+                      ) : (
+                        <span className="dm-mcp-check dm-mcp-unconnected">!</span>
+                      ))}
                   </div>
                 )
               }
@@ -2841,12 +2855,21 @@ export function App() {
                       mcp.enabled ? 'active-mcp' : 'disabled-mcp'
                     }`}
                     title={`${mcp.name} MCP Connector (${
-                      mcp.enabled ? 'Active' : 'Click to enable'
+                      !isMcpConnected(mcp)
+                        ? 'Not connected: no server URL, so the AI cannot read it'
+                        : mcp.enabled
+                        ? 'Active'
+                        : 'Click to enable'
                     })`}
                     onClick={() => handleToggleMcp(mcp.id)}
                   >
                     <span>H</span>
-                    {mcp.enabled && <span className="dm-mcp-check">✓</span>}
+                    {mcp.enabled &&
+                      (isMcpConnected(mcp) ? (
+                        <span className="dm-mcp-check">✓</span>
+                      ) : (
+                        <span className="dm-mcp-check dm-mcp-unconnected">!</span>
+                      ))}
                   </div>
                 )
               }
@@ -2860,7 +2883,12 @@ export function App() {
                   onClick={() => handleToggleMcp(mcp.id)}
                 >
                   <span>{mcp.name}</span>
-                  {mcp.enabled && <span className="dm-mcp-check">✓</span>}
+                  {mcp.enabled &&
+                      (isMcpConnected(mcp) ? (
+                        <span className="dm-mcp-check">✓</span>
+                      ) : (
+                        <span className="dm-mcp-check dm-mcp-unconnected">!</span>
+                      ))}
                 </div>
               )
             })}
@@ -2874,6 +2902,19 @@ export function App() {
               +
             </button>
           </div>
+          {activeProject.mcps.some((m) => m.enabled && !isMcpConnected(m)) && (
+            <p className="dm-mcp-note">
+              {activeProject.mcps
+                .filter((m) => m.enabled && !isMcpConnected(m))
+                .map((m) => m.name)
+                .join(' and ')}{' '}
+              {activeProject.mcps.filter((m) => m.enabled && !isMcpConnected(m)).length === 1
+                ? "isn't"
+                : "aren't"}{' '}
+              connected (no MCP server URL), so the AI can't read them. It only uses public web
+              pages, and every row is checked against the page it cites.
+            </p>
+          )}
         </section>
 
         </fieldset>
